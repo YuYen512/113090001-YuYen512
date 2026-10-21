@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>想像生物 · 第一階段</title>
+<style>
+  :root {
+    --bg: #050b14;
+    --ink: #d8eef5;
+    --accent: #8cf5e3;
+    /* 控制面板（參考 Tweakpane 的精簡風格，黑白灰配色） */
+    --pane-bg: rgba(18, 18, 18, 0.86);
+    --pane-line: rgba(255, 255, 255, 0.07);
+    --pane-label: #8a8a8a;
+    --pane-value: #e2e2e2;
+    --pane-field: rgba(255, 255, 255, 0.07);
+    --pane-field-hover: rgba(255, 255, 255, 0.12);
+    --pane-active: #e8e8e8;
+    --pane-active-ink: #111111;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+
+  #pane { position: fixed; left: 12px; top: 12px; width: 236px; max-width: calc(100vw - 24px);
+    background: var(--pane-bg); border-radius: 6px; backdrop-filter: blur(8px);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); font-size: 11.5px; line-height: 1; user-select: none; }
+  .pane-title { all: unset; display: flex; align-items: center; justify-content: flex-end; width: 100%;
+    box-sizing: border-box; height: 20px; padding: 0 10px; cursor: pointer; border-radius: 6px 6px 0 0; }
+  .pane-title:hover { background: var(--pane-line); }
+  .pane-title:focus-visible { outline: 1px solid var(--pane-label); }
+  #pane.closed { width: auto; }
+  #pane.closed .pane-title { width: 32px; border-radius: 6px; justify-content: center; padding: 0; }
+  .caret { display: inline-block; flex: none; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 5px solid var(--pane-label); transition: transform 0.15s; }
+  #pane.closed .caret { transform: rotate(-90deg); }
+  #pane.closed .pane-body { display: none; }
+  .pane-body { padding: 4px 0 6px; border-top: 1px solid var(--pane-line); }
+
+  .row { display: grid; grid-template-columns: 74px 1fr; align-items: center; gap: 8px;
+    min-height: 26px; padding: 2px 10px; }
+  .label { color: var(--pane-label); white-space: nowrap; }
+  .value { color: var(--pane-value); display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+
+  .status { display: flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; border-radius: 3px;
+    background: var(--pane-field); color: var(--pane-value); width: 100%; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pane-value);
+    box-shadow: 0 0 6px rgba(255, 255, 255, 0.6); flex: none; }
+
+  .seg { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; width: 100%; }
+  .seg button { all: unset; height: 20px; text-align: center; border-radius: 3px; cursor: pointer;
+    background: var(--pane-field); color: var(--pane-label); font-size: 11.5px; }
+  .seg button:hover { background: var(--pane-field-hover); color: var(--pane-value); }
+  .seg button[aria-pressed="true"] { background: var(--pane-active); color: var(--pane-active-ink); font-weight: 600; }
+  .seg button:focus-visible { outline: 1px solid var(--pane-label); }
+
+  .folder { margin-top: 4px; border-top: 1px solid var(--pane-line); }
+  .folder-title { all: unset; display: flex; align-items: center; gap: 6px; width: 100%; box-sizing: border-box;
+    padding: 7px 10px 5px; cursor: pointer; color: var(--pane-label); font-size: 11px; letter-spacing: 0.04em; }
+  .folder-title:hover { color: var(--pane-value); }
+  .folder.closed .caret { transform: rotate(-90deg); }
+  .folder.closed .folder-body { display: none; }
+
+  kbd { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 1;
+    padding: 3px 5px; border-radius: 3px; background: var(--pane-field); color: var(--pane-value);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.35); }
+  .sep { color: var(--pane-label); opacity: 0.6; }
+
+  #err { display: none; position: fixed; inset: 0; place-items: center; padding: 24px; text-align: center;
+    color: var(--ink); background: var(--bg); font-size: 15px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<!-- 控制面板：風格參考 Tweakpane（https://github.com/cocopon/tweakpane） -->
+<div id="pane">
+  <button class="pane-title" id="paneToggle" type="button" aria-expanded="true" aria-label="收合／展開控制面板">
+    <span class="caret"></span>
+  </button>
+  <div class="pane-body">
+    <div class="row">
+      <span class="label">狀態</span>
+      <span class="value"><span class="status"><span class="dot"></span><span id="status">飛行中</span></span></span>
+    </div>
+    <div class="row">
+      <span class="label">模式</span>
+      <span class="value seg" role="group" aria-label="模式">
+        <button type="button" data-mode="fly" aria-pressed="true">飛行</button>
+        <button type="button" data-mode="hover" aria-pressed="false">漂浮</button>
+        <button type="button" data-mode="sleep" aria-pressed="false">睡覺</button>
+      </span>
+    </div>
+
+    <div class="folder" id="keysFolder">
+      <button class="folder-title" type="button" aria-expanded="true"><span class="caret"></span>操作</button>
+      <div class="folder-body">
+        <div class="row"><span class="label">前進／後退</span><span class="value"><kbd>W</kbd><kbd>S</kbd><span class="sep">或</span><kbd>↑</kbd><kbd>↓</kbd></span></div>
+        <div class="row"><span class="label">轉向</span><span class="value"><kbd>A</kbd><kbd>D</kbd><span class="sep">或</span><kbd>←</kbd><kbd>→</kbd></span></div>
+        <div class="row"><span class="label">上升</span><span class="value"><kbd>Space</kbd><kbd>E</kbd></span></div>
+        <div class="row"><span class="label">下降</span><span class="value"><kbd>Shift</kbd><kbd>Q</kbd></span></div>
+        <div class="row"><span class="label">飛行／漂浮</span><span class="value"><kbd>M</kbd></span></div>
+        <div class="row"><span class="label">睡覺／醒來</span><span class="value"><kbd>Z</kbd></span></div>
+        <div class="row"><span class="label">視角</span><span class="value">拖曳旋轉<span class="sep">·</span>滾輪縮放</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="err"></div>
+
+<!-- creature_data.js 由 Rust 產生（cargo run） -->
+<script src="creature_data.js"></script>
+<!-- environment_data.js 由 Rust 產生（cargo run） -->
+<script src="environment_data.js"></script>
+<script src="viewer.js"></script>
+</body>
+</html>
