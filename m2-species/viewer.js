@@ -70,6 +70,7 @@ const CONFIG = {
     climbSpeed: 1.3,           // 上升 / 下降速度
     bankDeg: 24,               // 轉彎時身體傾斜的角度
     floorY: -3.0,              // 地面高度（有環境時會用環境的地面高度）
+    // CHECK(D08): 飛行高度上限 30，但冷卻塔有 80 高，飛不到塔頂（待確認要不要提高）
     ceilingY: 30.0,            // 最高可以飛多高（夠飛過廢墟）
     collisionRadius: 0.95,     // 碰撞時把生物當成多大的一顆球
     groundClearance: 1.2,      // 離地面至少多高
@@ -650,7 +651,7 @@ gl.bindVertexArray(null);
 //  操作：滑鼠視角、模式切換、鍵盤飛行
 // ---------------------------------------------------------------------
 // 鏡頭角度只在拖曳滑鼠時改變；生物移動時鏡頭只平移跟著牠，角度保持不變
-const cam = { ...CONFIG.camera, target: [0, 0, 0] };
+const cam = { ...CONFIG.camera, target: [0, 0, 0], actual: CONFIG.camera.distance };   // actual = 鏡頭實際的距離（被牆擋住時會比 distance 近）
 let dragging = null;
 
 canvas.addEventListener('pointerdown', (e) => { dragging = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); });
@@ -697,8 +698,10 @@ makeCollapsible(keysFolder, keysFolder.querySelector('.folder-title'));
 const keys = new Set();
 const CONTROL_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'ShiftLeft', 'ShiftRight'];
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'KeyM') { setMode(mode === 'fly' ? 'hover' : 'fly'); return; }
-  if (e.code === 'KeyZ') { setMode(mode === 'sleep' ? 'hover' : 'sleep'); return; }
+  // FIXED(D03): 長按 M 時，按鍵自動重複（e.repeat）不再切換飛行／漂浮
+  if (e.code === 'KeyM') { if (!e.repeat) setMode(mode === 'fly' ? 'hover' : 'fly'); return; }
+  // FIXED(D02): 長按 Z 時，按鍵自動重複（e.repeat）不再切換睡覺／醒來
+  if (e.code === 'KeyZ') { if (!e.repeat) setMode(mode === 'sleep' ? 'hover' : 'sleep'); return; }
   if (CONTROL_KEYS.includes(e.code)) {
     e.preventDefault();
     keys.add(e.code);
@@ -749,6 +752,7 @@ function groundHeightAt(x, z) {
 
 const SHELL_HALF = 0.6;   // 冷卻塔殼的半厚度
 
+// FIXED(D05): 身體會被牆、柱子、鐵絲網、煙囪、冷卻塔擋住，不會穿過去
 function resolveCollisions(p, radius) {
   const normals = [];
   if (COL) {
@@ -909,6 +913,7 @@ function animate(t, dt) {
   const local = {
     root: root,
     core: Mat.mul(Mat.translate(...DATA.bones[boneIndex.core].pivot), Mat.scale(coreScale)),
+    // CHECK(D06): 碰撞只算身體那顆球，翅膀貼牆時會穿過牆（待確認要怎麼處理）
     wing_r: Mat.chain(Mat.translate(...DATA.bones[boneIndex.wing_r].pivot), Mat.rotZ(deg(flapDeg)), Mat.rotX(feather)),
     wing_l: Mat.chain(Mat.translate(...DATA.bones[boneIndex.wing_l].pivot), Mat.rotZ(deg(-flapDeg)), Mat.rotX(feather)),
   };
@@ -945,6 +950,43 @@ function randInSphere() {
   }
 }
 
+// 孢子碰撞用的分格表：把碰撞方塊依照 x、z 位置放進 8×8 的格子，孢子只要檢查自己那一格
+const SPORE_CELL = 8;
+const sporeGrid = new Map();
+if (COL) {
+  for (const b of COL.boxes) {
+    const x0 = Math.floor((b.c[0] - b.r) / SPORE_CELL), x1 = Math.floor((b.c[0] + b.r) / SPORE_CELL);
+    const z0 = Math.floor((b.c[2] - b.r) / SPORE_CELL), z1 = Math.floor((b.c[2] + b.r) / SPORE_CELL);
+    for (let i = x0; i <= x1; i++) for (let j = z0; j <= z1; j++) {
+      const key = i + ',' + j;
+      if (!sporeGrid.has(key)) sporeGrid.set(key, []);
+      sporeGrid.get(key).push(b);
+    }
+  }
+}
+
+// 孢子如果跑進某個方塊裡，就把它推到最近的表面上（屋頂、樓板的頂面，或牆面），回傳有沒有碰到
+function pushSporeOut(p) {
+  const list = sporeGrid.get(Math.floor(p[0] / SPORE_CELL) + ',' + Math.floor(p[2] / SPORE_CELL));
+  if (!list) return false;
+  for (const b of list) {
+    const d = [p[0] - b.c[0], p[1] - b.c[1], p[2] - b.c[2]];
+    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > b.r * b.r) continue;
+    const local = b.ax.map((a) => d[0] * a[0] + d[1] * a[1] + d[2] * a[2]);
+    if (local.some((v, k) => Math.abs(v) > b.h[k])) continue;
+    // 在方塊裡面：從最淺的那一面推出去
+    let best = 0, bestPen = Infinity;
+    for (let k = 0; k < 3; k++) {
+      const pen = b.h[k] - Math.abs(local[k]);
+      if (pen < bestPen) { bestPen = pen; best = k; }
+    }
+    const sgn = Math.sign(local[best]) || 1;
+    for (let a = 0; a < 3; a++) p[a] += b.ax[best][a] * sgn * (bestPen + 0.005);
+    return true;
+  }
+  return false;
+}
+
 function updateSpores(t, dt, pose) {
   const rate = lerp(SP.hoverRate, SP.flyRate, pose.fly) * (0.3 + 1.4 * pose.wave) * (1 - pose.sleep);
   let toSpawn = rate * dt;
@@ -973,14 +1015,19 @@ function updateSpores(t, dt, pose) {
     const sp = spores[n];
     sp.age += dt;
     if (sp.age >= sp.life) { spores.splice(n, 1); continue; }
+    if (sp.landed) continue;                                      // 已經停住的孢子不再移動，只會慢慢熄滅
     sp.v[1] -= SP.gravity * dt;
     sp.v[0] += Math.sin(t * 0.7 + sp.seed * 30) * 0.05 * dt;   // 微弱的氣流
     sp.v[2] += Math.cos(t * 0.6 + sp.seed * 17) * 0.05 * dt;
     for (let a = 0; a < 3; a++) { sp.v[a] *= damp; sp.p[a] += sp.v[a] * dt; }
+    // FIXED(D07): 除了地面，也會停在屋頂、樓板、牆面上（用分格表只檢查附近的方塊）
     const g = groundHeightAt(sp.p[0], sp.p[2]);
-    if (sp.p[1] <= g) {                                           // 落地後停住、慢慢熄滅
-      sp.p[1] = g;
+    let land = sp.p[1] <= g;
+    if (land) sp.p[1] = g;
+    else land = pushSporeOut(sp.p);
+    if (land) {                                                   // 落地後停住、慢慢熄滅
       sp.v = [0, 0, 0];
+      sp.landed = true;
       sp.life = Math.min(sp.life, sp.age + 2.5);
     }
   }
@@ -998,13 +1045,66 @@ function updateSpores(t, dt, pose) {
 // ---------------------------------------------------------------------
 //  鏡頭：平移跟著生物，角度固定（只有拖曳滑鼠才會旋轉）
 // ---------------------------------------------------------------------
+// 鏡頭碰撞：從生物往鏡頭方向射一條線，看最近在多遠的地方會碰到牆、柱子、煙囪、冷卻塔或地面。
+// 回傳鏡頭最多可以放多遠（不會超過 want）。
+const CAM_MARGIN = 0.3;     // 鏡頭和牆之間至少留這麼多空間
+const CAM_MIN = 0.15;       // 鏡頭最近可以靠到多近（碰撞優先：不能為了保持距離把鏡頭推進牆裡）
+function cameraClearance(o, dir, want) {
+  let best = want;
+  if (COL) {
+    for (const b of COL.boxes) {
+      // 先粗略排除：方塊離這條線太遠就不用細算
+      const cx = b.c[0] - o[0], cy = b.c[1] - o[1], cz = b.c[2] - o[2];
+      const tc = Math.max(0, Math.min(best, cx * dir[0] + cy * dir[1] + cz * dir[2]));
+      const qx = cx - dir[0] * tc, qy = cy - dir[1] * tc, qz = cz - dir[2] * tc;
+      const lim = b.r + CAM_MARGIN;
+      if (qx * qx + qy * qy + qz * qz > lim * lim) continue;
+      // 細算：把線轉到方塊自己的座標裡，三個方向各算一次「進入、離開」的距離（slab 法）
+      let tIn = -Infinity, tOut = Infinity;
+      for (let k = 0; k < 3 && tIn <= tOut; k++) {
+        const a = b.ax[k], h = b.h[k] + CAM_MARGIN;
+        const ok = -(cx * a[0] + cy * a[1] + cz * a[2]);       // 起點在方塊座標裡的位置
+        const dk = dir[0] * a[0] + dir[1] * a[1] + dir[2] * a[2];
+        if (Math.abs(dk) < 1e-6) { if (Math.abs(ok) > h) tIn = Infinity; continue; }
+        let t1 = (-h - ok) / dk, t2 = (h - ok) / dk;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tIn = Math.max(tIn, t1); tOut = Math.min(tOut, t2);
+      }
+      if (tIn <= tOut && tIn >= 0 && tIn < best) best = tIn;
+    }
+  }
+  // 圓柱（煙囪、冷卻塔）和地面：沿著線一小段一小段檢查
+  for (let s = 0.4; s < best; s += 0.25) {
+    const p = [o[0] + dir[0] * s, o[1] + dir[1] * s, o[2] + dir[2] * s];
+    let hit = p[1] < groundHeightAt(p[0], p[2]) + CAM_MARGIN;
+    if (!hit && COL) {
+      for (const c of COL.cyls) {
+        const y = p[1] - c.base[1];
+        if (y < -CAM_MARGIN || y > c.height + CAM_MARGIN) continue;
+        const t = Math.max(0, Math.min(1, y / c.height)) * (c.radii.length - 1);
+        const i0 = Math.min(Math.floor(t), c.radii.length - 2);
+        const R = lerp(c.radii[i0], c.radii[i0 + 1], t - i0);
+        const rho = Math.hypot(p[0] - c.base[0], p[2] - c.base[2]);
+        if (c.shell ? Math.abs(rho - R) < SHELL_HALF + CAM_MARGIN : rho < R + CAM_MARGIN) { hit = true; break; }
+      }
+    }
+    if (hit) { best = s - 0.25; break; }
+  }
+  return Math.max(CAM_MIN, best);
+}
+
+// FIXED(D04): 鏡頭會被牆擋住時自動拉近到牆前面，障礙物離開後再慢慢退回原本的距離
 function updateCamera(t, dt) {
   const k = ease(4, dt);
   for (let a = 0; a < 3; a++) cam.target[a] += (flight.pos[a] - cam.target[a]) * k;
+  const dir = [Math.sin(cam.yaw) * Math.cos(cam.pitch), Math.sin(cam.pitch), Math.cos(cam.yaw) * Math.cos(cam.pitch)];
+  const allowed = cameraClearance(cam.target, dir, cam.distance);
+  // 被擋住時立刻拉近（才不會看到牆裡面），沒被擋住時慢慢退回去（畫面才不會一直跳）
+  cam.actual = allowed < cam.actual ? allowed : cam.actual + (allowed - cam.actual) * ease(2.5, dt);
   return [
-    cam.target[0] + Math.sin(cam.yaw) * Math.cos(cam.pitch) * cam.distance,
-    cam.target[1] + Math.sin(cam.pitch) * cam.distance,
-    cam.target[2] + Math.cos(cam.yaw) * Math.cos(cam.pitch) * cam.distance,
+    cam.target[0] + dir[0] * cam.actual,
+    cam.target[1] + dir[1] * cam.actual,
+    cam.target[2] + dir[2] * cam.actual,
   ];
 }
 

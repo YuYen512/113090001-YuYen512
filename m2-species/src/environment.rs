@@ -16,7 +16,7 @@
 use crate::hyphae::Rng;
 use crate::math::Vec3;
 use crate::mesh::Mesh;
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 
 const KIND_GROUND: f32 = 0.0;
 const KIND_CONCRETE: f32 = 1.0;
@@ -275,6 +275,9 @@ fn add_quad(m: &mut Mesh, p: [Vec3; 4], n: Vec3, uv: [[f32; 2]; 4], w: [f32; 4],
 }
 
 /// 旋轉體（煙囪、冷卻塔）。radius(t, angle) 回傳半徑，top(angle) 回傳頂端高度比例（0~1），做出斷裂的頂。
+// FIXED(R04): 參數有 8 個（Clippy 建議 7 個以內）。每個參數都有用到，硬拆成結構反而難讀，
+// 所以決定保留，並明確告訴 Clippy 這是刻意的
+#[allow(clippy::too_many_arguments)]
 fn add_lathe(
     m: &mut Mesh,
     base: Vec3,
@@ -419,7 +422,8 @@ fn add_vine(m: &mut Mesh, rng: &mut Rng, top: Vec3, outward: Vec3, along: Vec3, 
     let seg = 0.55;
     let steps = (length / seg).ceil() as usize;
     let mut p = top;
-    let wiggle_phase = rng.range(0.0, 6.28);
+    // FIXED(R01): 改用 TAU（= 2π），原本的 6.28 少了一小段角度
+    let wiggle_phase = rng.range(0.0, TAU);
     let stem_c = [0.17, 0.21, 0.1];
     for i in 0..steps {
         let t = i as f32 / steps as f32;
@@ -546,8 +550,9 @@ fn build_ruin(cfg: &EnvironmentConfig, r: &Ruin, rng: &mut Rng, solid: &mut Soli
 
         // 斷口：每一欄最上面那一格高度不一、微微歪斜，有的還露出鋼筋
         let axes_w = if axis == 0 { [ax[0], ax[1], ax[2]] } else { [ax[2], ax[1], ax[0]] };
-        for c in 0..cols {
-            let row = tops[c] - 1;
+        // FIXED(R05): 改成 iter().enumerate()，同時拿到第幾欄（c）和那一欄的高度（top）
+        for (c, &top) in tops.iter().enumerate() {
+            let row = top - 1;
             let frac = rng.range(0.25, 1.0);
             let y0 = row as f32 * cell;
             let hgt = cell * frac;
@@ -571,11 +576,12 @@ fn build_ruin(cfg: &EnvironmentConfig, r: &Ruin, rng: &mut Rng, solid: &mut Soli
         }
 
         // 爬藤：從還站著的牆頂垂下來
-        for c in 0..cols {
-            if tops[c] < 2 || rng.next_f32() > 0.4 {
+        // FIXED(R06): 改成 iter().enumerate()，同時拿到第幾欄（c）和那一欄的高度（top）
+        for (c, &top) in tops.iter().enumerate() {
+            if top < 2 || rng.next_f32() > 0.4 {
                 continue;
             }
-            let top_y = tops[c] as f32 * cell;
+            let top_y = top as f32 * cell;
             let top = wall_start + along * ((c as f32 + rng.range(0.2, 0.8)) * cw) + ax[1] * top_y + outward * (thick * 0.5 + 0.03);
             let length = top_y * rng.range(0.35, 0.95);
             add_vine(plants, rng, top, outward, along, length);
@@ -612,7 +618,8 @@ fn build_ruin(cfg: &EnvironmentConfig, r: &Ruin, rng: &mut Rng, solid: &mut Soli
         let p = local(lx, 0.0, lz);
         let gy = ground_height(cfg, p.x, p.z);
         let surf = Surface { color: scale3([0.34, 0.33, 0.3], rng.range(0.75, 1.1)), moss: 0.6, kind: KIND_CONCRETE };
-        let axes = axes_yaw_tilt(rng.range(0.0, 6.28), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5));
+        // FIXED(R02): 改用 TAU（= 2π），原本的 6.28 少了一小段角度
+        let axes = axes_yaw_tilt(rng.range(0.0, TAU), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5));
         let half = [size * rng.range(0.5, 1.0), size * rng.range(0.3, 0.6), size * rng.range(0.5, 1.0)];
         let c = Vec3::new(p.x, gy + size * 0.25, p.z);
         if size > 1.0 { solid_box(solid, c, axes, half, &surf); } else { add_obox(&mut solid.mesh, c, axes, half, &surf); }
@@ -895,7 +902,8 @@ fn build_debris(cfg: &EnvironmentConfig, rng: &mut Rng, solid: &mut Solid) {
         let slab = rng.next_f32() < 0.3;
         let size = if slab { rng.range(1.0, 2.6) } else { rng.range(0.25, 1.1) };
         let half = if slab { [size, 0.2, size * rng.range(0.4, 0.8)] } else { [size * rng.range(0.5, 1.0), size * rng.range(0.3, 0.7), size * rng.range(0.5, 1.0)] };
-        let axes = axes_yaw_tilt(rng.range(0.0, 6.28), rng.range(-0.35, 0.35), rng.range(-0.35, 0.35));
+        // FIXED(R03): 改用 TAU（= 2π），原本的 6.28 少了一小段角度
+        let axes = axes_yaw_tilt(rng.range(0.0, TAU), rng.range(-0.35, 0.35), rng.range(-0.35, 0.35));
         let moss = if slab { 0.25 } else { 0.5 };
         let surf = Surface { color: scale3([0.28, 0.27, 0.25], rng.range(0.7, 1.05)), moss, kind: KIND_CONCRETE };
         add_obox(&mut solid.mesh, Vec3::new(x, gy + half[1] * if slab { -0.2 } else { 0.4 }, z), axes, half, &surf);
