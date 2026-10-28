@@ -2,7 +2,9 @@
 //!
 //! 座標系：y 朝上，z 朝前（頭在 +z，尾巴在 -z），x 朝生物的右側。
 
+use crate::eye_spots;
 use crate::hyphae;
+use crate::tendrils;
 use crate::wing_glow;
 use crate::math::Vec3;
 use crate::mesh::{fmt_f, fmt_rgb, fmt_vec3, Mesh};
@@ -89,6 +91,23 @@ pub struct CreatureConfig {
     pub wing_spot_fork_chance: f32,
     pub wing_spot_seed: u64,
 
+    // ── 尾巴的孢子觸手（進化：尾巴變成撒孢子的器官）──
+    /// 觸手數量
+    pub tendril_count: usize,
+    /// 觸手長度
+    pub tendril_length: f32,
+    /// 觸手往外張開的程度（0 = 全部筆直往後）
+    pub tendril_spread: f32,
+    /// 觸手根部的粗細（半徑）
+    pub tendril_radius: f32,
+    /// 末端孢子囊的大小（半徑）
+    pub tendril_bulb: f32,
+    pub tendril_seed: u64,
+
+    // ── 感光點（進化：在昏暗的廢墟和地底感覺光的方向）──
+    /// 右側每一顆的 (前後位置 z, 繞身體的角度（度，0 = 正側面、90 = 正上方）, 半徑)；左側自動鏡射
+    pub eye_spots: Vec<(f32, f32, f32)>,
+
     // ── 顏色（0~1 的 RGB）──
     pub body_color: [f32; 3],
     pub core_color: [f32; 3],
@@ -138,6 +157,15 @@ impl Default for CreatureConfig {
             wing_spot_fork_chance: 0.8,
             wing_spot_seed: 512,
 
+            tendril_count: 5,
+            tendril_length: 1.45,
+            tendril_spread: 0.3,
+            tendril_radius: 0.014,
+            tendril_bulb: 0.026,
+            tendril_seed: 1029,
+
+            eye_spots: vec![(0.86, 34.0, 0.05), (0.77, 48.0, 0.036), (0.74, 24.0, 0.028)],
+
             body_color: [0.62, 0.82, 0.95],
             core_color: [0.55, 1.0, 0.9],
             wing_color: [0.75, 0.88, 1.0],
@@ -156,7 +184,7 @@ pub struct Bone {
 pub struct Part {
     pub name: &'static str,
     pub bone: &'static str,
-    /// 檢視器用哪一種材質畫它："body" / "wing" / "core" / "hypha" / "wing_glow"
+    /// 檢視器用哪一種材質畫它："body" / "wing" / "core" / "hypha" / "wing_glow" / "tendril" / "eye_spot"
     pub material: &'static str,
     pub alpha: f32,
     pub mesh: Mesh,
@@ -165,6 +193,8 @@ pub struct Part {
 pub struct Creature {
     pub bones: Vec<Bone>,
     pub parts: Vec<Part>,
+    /// 觸手末端孢子囊的位置（檢視器從這裡灑孢子）
+    pub tendril_tips: Vec<Vec3>,
 }
 
 pub fn build(cfg: &CreatureConfig) -> Creature {
@@ -180,19 +210,23 @@ pub fn build(cfg: &CreatureConfig) -> Creature {
     let wing_l = wing_r.mirror_x();
     let glow_r = wing_glow::build(cfg);
     let glow_l = glow_r.mirror_x();
+    let shape = BodyShape::new(cfg);
+    let tails = tendrils::build(cfg, &shape);
 
     let parts = vec![
         Part { name: "core", bone: "core", material: "core", alpha: 1.0, mesh: sphere_mesh(cfg.core_radius, 18, 24) },
         Part { name: "inner_body", bone: "root", material: "body", alpha: 0.45, mesh: body_mesh(cfg, cfg.inner_scale) },
-        Part { name: "hyphae", bone: "root", material: "hypha", alpha: 1.0, mesh: hyphae::build(cfg, &BodyShape::new(cfg)) },
+        Part { name: "hyphae", bone: "root", material: "hypha", alpha: 1.0, mesh: hyphae::build(cfg, &shape) },
         Part { name: "body", bone: "root", material: "body", alpha: 1.0, mesh: body_mesh(cfg, 1.0) },
+        Part { name: "tendrils", bone: "root", material: "tendril", alpha: 1.0, mesh: tails.mesh },
+        Part { name: "eye_spots", bone: "root", material: "eye_spot", alpha: 1.0, mesh: eye_spots::build(cfg, &shape) },
         Part { name: "wing_r", bone: "wing_r", material: "wing", alpha: 1.0, mesh: wing_r },
         Part { name: "wing_l", bone: "wing_l", material: "wing", alpha: 1.0, mesh: wing_l },
         Part { name: "wing_glow_r", bone: "wing_r", material: "wing_glow", alpha: 1.0, mesh: glow_r },
         Part { name: "wing_glow_l", bone: "wing_l", material: "wing_glow", alpha: 1.0, mesh: glow_l },
     ];
 
-    Creature { bones, parts }
+    Creature { bones, parts, tendril_tips: tails.tips }
 }
 
 /// 旋轉體：沿 z 軸一圈一圈產生頂點。
@@ -276,6 +310,18 @@ impl BodyShape {
     pub fn tail_weight(&self, z: f32) -> f32 {
         let t = (-z / self.half).clamp(0.0, 1.0);
         t * t
+    }
+
+    /// 身體中心軸在 z 處的高度（尾巴會微微往上翹）
+    pub fn axis_y(&self, z: f32) -> f32 {
+        self.tail_lift * self.tail_weight(z)
+    }
+
+    /// 身體表面上的一點：z = 前後位置，phi = 繞著身體的角度（0 = 右側，PI/2 = 正上方）
+    pub fn surface(&self, z: f32, phi: f32) -> Vec3 {
+        let theta = (-z / self.half).clamp(-1.0, 1.0).acos();
+        let r = self.radius_at_theta(theta);
+        Vec3::new(r * phi.cos(), r * phi.sin() * self.flatten + self.axis_y(z), z)
     }
 
     /// 點 p 在身體裡的「深度比例」：0 = 中心軸，1 = 剛好在表面，大於 1 = 在身體外。
@@ -439,7 +485,7 @@ impl Creature {
             "{{\"name\":\"{}\",\"colors\":{{\"body\":{},\"core\":{},\"wing\":{}}},\
              \"params\":{{\"wing_rest_angle_deg\":{},\"wing_span\":{},\"core_radius\":{},\
              \"body_length\":{},\"body_radius\":{},\"body_taper\":{},\"body_flatten\":{},\"tail_lift\":{}}},\
-             \"bones\":[{}],\"parts\":[{}]}}",
+             \"tendril_tips\":[{}],\"bones\":[{}],\"parts\":[{}]}}",
             cfg.name,
             fmt_rgb(cfg.body_color),
             fmt_rgb(cfg.core_color),
@@ -452,6 +498,7 @@ impl Creature {
             fmt_f(cfg.body_taper),
             fmt_f(cfg.body_flatten),
             fmt_f(cfg.tail_lift),
+            self.tendril_tips.iter().map(|&p| fmt_vec3(p)).collect::<Vec<_>>().join(","),
             bones.join(","),
             parts.join(",")
         )

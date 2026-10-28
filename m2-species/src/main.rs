@@ -5,9 +5,11 @@
 
 mod creature;
 mod environment;
+mod eye_spots;
 mod hyphae;
 mod math;
 mod mesh;
+mod tendrils;
 mod wing_glow;
 
 use std::fs;

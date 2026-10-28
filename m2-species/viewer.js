@@ -55,6 +55,22 @@ const CONFIG = {
   },
   wingRootBlend: 0.42,         // 翅根埋在身體裡的這一段慢慢變透明，和身體自然接在一起
 
+  // CHECK(D09): 觸手沒有碰撞，倒退貼牆時末端可能伸進牆裡（待決定要不要處理）
+  // 尾巴的孢子觸手（形狀由 Rust 產生，這裡管飄動和亮度）
+  tendrils: {
+    waveSpeed: 1.6,            // 觸手波動的速度
+    waveAmp: 0.24,             // 波動幅度（越往末端越大）
+    droop: 0.5,                // 漂浮時往下垂的量（飛行時被氣流拉直，垂得比較少）
+    turnLag: 0.35,             // 轉彎時觸手往外甩的量
+    brightness: 1.0,           // 亮度
+    sporeShare: 0.6,           // 孢子有多少比例是從觸手末端的孢子囊灑出來的（其餘從身體裡的菌絲）
+  },
+  // 感光點
+  eyeSpots: {
+    glow: 0.9,                 // 外圈微光的亮度
+    sleepGlow: 0.15,           // 睡著時剩多少（像閉上眼睛）
+  },
+
   // 環境（夜晚的廢墟）：月光、環境光、霧
   environment: {
     moonDir: [-0.5, 0.7, 0.45],     // 月光從哪個方向照過來
@@ -161,7 +177,17 @@ uniform mat4 u_rootModel;
 uniform float u_fold, u_side;
 uniform vec4 u_body;                 // (半長, 最粗半徑, 尾巴收尖, 正規化係數)
 uniform float u_bodyFlat, u_tailLift, u_wrapFrom, u_wrapTo, u_wingSpan, u_wrapGap, u_wrapAngle;
+// 尾巴觸手的飄動：(波動相位, 波動幅度, 轉彎甩動, 下垂量)
+uniform vec4 u_tendril;
 out vec3 v_wpos; out vec3 v_nrm; out vec2 v_uv; out vec3 v_lpos;
+
+// 觸手上一點的飄動（JS 的 tendrilWorld 用同一個公式算孢子囊的位置）
+//   t = 在觸手上的位置（0 根部 → 1 末端），idx = 第幾條
+vec3 tendrilWave(float t, float idx) {
+  float ph = u_tendril.x - t * 3.0 + idx * 1.7;
+  float amp = u_tendril.y * t * t;
+  return vec3(sin(ph) * amp + u_tendril.z * t * t, cos(ph * 0.8 + idx) * amp * 0.6, 0.0);
+}
 
 // 身體在 z 處的半徑（和 Rust 的水滴輪廓同一個公式）
 float bodyRadiusAt(float z) {
@@ -184,14 +210,18 @@ void wrapWing(vec3 lp, out vec3 pos, out vec3 nrm) {
 void main() {
   vec3 p = a_pos;
   v_lpos = a_pos;
-  if (u_mat == 0 || u_mat == 3) {   // 身體與菌絲：呼吸般的膨脹 + 擺尾
+  if (u_mat == 0 || u_mat == 3 || u_mat == 6) {   // 身體、菌絲、感光點：呼吸般的膨脹 + 擺尾
     p.xy *= 1.0 + u_breath * (1.0 - a_w);
     p.x += u_sway * a_w;
     p.y += u_lift * a_w;
+  } else if (u_mat == 5) {          // 尾巴觸手：根部跟著尾巴擺，越往末端飄得越多
+    float t = fract(a_uv.y);
+    p += vec3(u_sway, u_lift, 0.0) + tendrilWave(t, floor(a_uv.y));
   } else if (u_mat == 1 || u_mat == 4) {   // 翅膀與翅膀上的光點：翅尖因慣性彎曲
     p.y += u_bend * a_w * a_w;
   }
   vec4 w = u_model * vec4(p, 1.0);
+  if (u_mat == 5) w.y -= u_tendril.w * pow(fract(a_uv.y), 2.0);   // 觸手受重力往下垂（世界的「下」）
   vec3 n = mat3(u_model) * a_nrm;
   if ((u_mat == 1 || u_mat == 4) && u_fold > 0.0) {
     vec3 fp, fn;
@@ -210,7 +240,7 @@ precision highp float;
 precision highp int;
 in vec3 v_wpos; in vec3 v_nrm; in vec2 v_uv; in vec3 v_lpos;
 uniform int u_mat;
-uniform float u_spotRoot, u_rootBlend, u_strandBright, u_foldOpacity;
+uniform float u_spotRoot, u_rootBlend, u_strandBright, u_foldOpacity, u_tendrilBright, u_eyeGlow;
 uniform vec3 u_camPos, u_corePos, u_lightDir;
 uniform vec3 u_bodyColor, u_coreColor, u_wingColor;
 uniform float u_coreI, u_alpha;
@@ -270,6 +300,30 @@ void main() {
       a = u_strandBright * (0.05 + 0.85 * I) * fade;
     }
     o = vec4(col, clamp(a * rootFade, 0.0, 1.0));
+    return;
+  }
+
+  if (u_mat == 5) {                    // 尾巴觸手：半透明的細絲，能量從菌絲一路流到末端的孢子囊
+    float t = fract(v_uv.y);
+    float dist = v_uv.x;
+    float I = (u_pulseBase * 0.5 + u_pulseAmp * energyAt(dist)) * exp(-(dist - 1.2) * u_fade * 0.5);
+    float bulb = smoothstep(0.84, 0.9, t);                     // 末端的孢子囊比較亮
+    vec3 col = u_bodyColor * (0.06 + 0.25 * fres) + u_coreColor * (0.12 + 0.9 * I) * (0.55 + 0.9 * bulb);
+    float a = (0.16 + 0.5 * I) * (1.0 - 0.35 * t) + 0.25 * fres + bulb * (0.3 + 0.5 * I);
+    o = vec4(col * u_tendrilBright, clamp(a, 0.0, 1.0));
+    return;
+  }
+
+  if (u_mat == 6) {                    // 感光點：深色的中心（吸收光）+ 一圈淡淡的微光 + 像鏡片一樣的反光
+    float r = v_uv.x;
+    float aa = fwidth(r) + 1e-3;
+    float pupil = 1.0 - smoothstep(0.42 - aa, 0.42 + aa, r);
+    float ring = smoothstep(0.3, 0.55, r) * (1.0 - smoothstep(0.7, 1.0, r));
+    float I = u_eyeGlow * (0.55 + 0.45 * energyAt(0.1));
+    float gloss = pow(max(dot(N, H), 0.0), 40.0) * pupil;
+    vec3 col = u_bodyColor * 0.05 * pupil + u_coreColor * ring * I * 1.3 + vec3(1.0) * gloss * 0.8;
+    float a = pupil * 0.8 + ring * I + gloss * 0.6;
+    o = vec4(col, clamp(a, 0.0, 1.0));
     return;
   }
 
@@ -606,7 +660,7 @@ function uploadMesh(mesh) {
   return { vao, count: mesh.indices.length };
 }
 
-const MAT_ID = { body: 0, wing: 1, core: 2, hypha: 3, wing_glow: 4 };
+const MAT_ID = { body: 0, wing: 1, core: 2, hypha: 3, wing_glow: 4, tendril: 5, eye_spot: 6 };
 const boneIndex = Object.fromEntries(DATA.bones.map((b, i) => [b.name, i]));
 const parts = Object.fromEntries(DATA.parts.map((p) => [p.name, {
   ...uploadMesh(p.mesh), bone: boneIndex[p.bone], mat: MAT_ID[p.material], alpha: p.alpha,
@@ -871,6 +925,7 @@ function updateFlight(t, dt) {
 // ---------------------------------------------------------------------
 let phase = 0;
 let breathePhase = 0;
+let tendrilPhase = 0;
 const wingFold = { r: 0, l: 0 };   // 兩邊翅膀現在往後收了幾度（弧度）
 
 // 翅膀收到 angle（弧度）時，翅膀會不會碰到東西：從翅根往翅尖、前緣中段、後緣中段各射一條線
@@ -964,6 +1019,16 @@ function animate(t, dt) {
     wing_l: Mat.chain(Mat.translate(...DATA.bones[boneIndex.wing_l].pivot), Mat.rotY(-wingFold.l), Mat.rotZ(deg(-flapL)), Mat.rotX(feather)),
   };
 
+  // 尾巴觸手：飛行時被氣流拉直、波動快一點；睡著時幾乎不動、垂下來
+  const TD = CONFIG.tendrils;
+  tendrilPhase += TD.waveSpeed * (1 + 0.6 * k) * (1 - 0.75 * sk) * dt;
+  const tendril = [
+    tendrilPhase,
+    TD.waveAmp * (1 - 0.6 * sk),
+    -TD.turnLag * (flight.turn / FL.turnRate) * (1 - sk),
+    lerp(lerp(TD.droop, TD.droop * 0.3, k), TD.droop * 1.4, sk),
+  ];
+
   const world = [];
   DATA.bones.forEach((b, i) => {
     const l = local[b.name] || Mat.translate(...b.pivot);
@@ -979,7 +1044,8 @@ function animate(t, dt) {
     breath: lerp(0.012 * Math.sin(t * 1.1), 0.02 * Math.sin(breathePhase), sk),
     bend: -CONFIG.wingBend * flapVel,
     phase, pulsePhase, pulseFreq: p.flapFreq / N, fly: k, pulseBase: p.pulseBase, pulseAmp: p.pulseAmp,
-    sleep: sk, breathePhase, breatheSpeed, glowScale: lerp(1, SL.glow, sk),
+    sleep: sk, breathePhase, breatheSpeed, glowScale: lerp(1, SL.glow, sk), tendril,
+    eyeGlow: CONFIG.eyeSpots.glow * lerp(1, CONFIG.eyeSpots.sleepGlow, sk),
   };
 }
 
@@ -988,6 +1054,23 @@ function animate(t, dt) {
 // ---------------------------------------------------------------------
 const hyphaPts = DATA.parts.find((p) => p.name === 'hyphae').mesh.positions;
 const spores = [];
+
+// 觸手末端孢子囊現在的位置：和著色器 tendrilWave 用同一個公式，孢子才會從看得到的孢子囊灑出來
+const TIPS = DATA.tendril_tips || [];
+const BULB_T = 0.93;
+function tendrilWorld(i, pose) {
+  const [ph, amp, lag, droop] = pose.tendril;
+  const w = ph - BULB_T * 3 + i * 1.7;
+  const a = amp * BULB_T * BULB_T;
+  const local = [
+    TIPS[i][0] + pose.sway + Math.sin(w) * a + lag * BULB_T * BULB_T,
+    TIPS[i][1] + pose.lift + Math.cos(w * 0.8 + i) * a * 0.6,
+    TIPS[i][2],
+  ];
+  const p = Mat.apply(pose.world[0], local);
+  p[1] -= droop * BULB_T * BULB_T;
+  return p;
+}
 
 function randInSphere() {
   for (;;) {
@@ -1040,8 +1123,13 @@ function updateSpores(t, dt, pose) {
   const back = [-Math.sin(flight.heading), 0, -Math.cos(flight.heading)];
   while ((toSpawn >= 1 || Math.random() < toSpawn) && spores.length < SP.max) {
     toSpawn -= 1;
-    const i = Math.floor(Math.random() * (hyphaPts.length / 3));
-    const pos = Mat.apply(rootM, [hyphaPts[i * 3], hyphaPts[i * 3 + 1], hyphaPts[i * 3 + 2]]);
+    let pos;
+    if (TIPS.length && Math.random() < CONFIG.tendrils.sporeShare) {   // 從觸手末端的孢子囊灑出來
+      pos = tendrilWorld(Math.floor(Math.random() * TIPS.length), pose);
+    } else {                                                           // 從身體裡的菌絲飄出來
+      const i = Math.floor(Math.random() * (hyphaPts.length / 3));
+      pos = Mat.apply(rootM, [hyphaPts[i * 3], hyphaPts[i * 3 + 1], hyphaPts[i * 3 + 2]]);
+    }
     const r = randInSphere();
     spores.push({
       p: pos,
@@ -1342,6 +1430,9 @@ function frame(now) {
   gl.uniform1f(u.u_strandBright, CONFIG.wingSpots.strandBrightness);
   gl.uniform1f(u.u_spotRoot, CONFIG.wingSpots.rootDistance);
   gl.uniform1f(u.u_rootBlend, CONFIG.wingRootBlend);
+  gl.uniform4fv(u.u_tendril, pose.tendril);
+  gl.uniform1f(u.u_tendrilBright, CONFIG.tendrils.brightness);
+  gl.uniform1f(u.u_eyeGlow, pose.eyeGlow);
 
   //   核心是不透明的，先畫並寫入深度
   gl.enable(gl.DEPTH_TEST);
@@ -1361,6 +1452,10 @@ function frame(now) {
       drawPart(parts.hyphae, pose, false);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       drawPart(parts.body, pose, true);
+      drawPart(parts.eye_spots, pose, false);              // 感光點貼在身體表面
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);                 // 觸手也用加法混合，看起來在發光
+      drawPart(parts.tendrils, pose, false);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     } },
     { d: dist(Mat.apply(pose.world[parts.wing_r.bone], [halfSpan, 0, 0])), draw: () => drawWing(parts.wing_r, parts.wing_glow_r, pose, 1) },
     { d: dist(Mat.apply(pose.world[parts.wing_l.bone], [-halfSpan, 0, 0])), draw: () => drawWing(parts.wing_l, parts.wing_glow_l, pose, -1) },
