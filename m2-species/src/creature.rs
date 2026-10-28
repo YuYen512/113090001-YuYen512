@@ -158,13 +158,13 @@ impl Default for CreatureConfig {
             wing_spot_seed: 512,
 
             tendril_count: 5,
-            tendril_length: 1.45,
-            tendril_spread: 0.3,
-            tendril_radius: 0.014,
-            tendril_bulb: 0.026,
+            tendril_length: 0.7,
+            tendril_spread: 0.2,
+            tendril_radius: 0.009,
+            tendril_bulb: 0.014,
             tendril_seed: 1029,
 
-            eye_spots: vec![(0.86, 34.0, 0.05), (0.77, 48.0, 0.036), (0.74, 24.0, 0.028)],
+            eye_spots: vec![(0.86, 34.0, 0.028), (0.79, 46.0, 0.021), (0.77, 26.0, 0.016)],
 
             body_color: [0.62, 0.82, 0.95],
             core_color: [0.55, 1.0, 0.9],

@@ -59,15 +59,15 @@ const CONFIG = {
   // 尾巴的孢子觸手（形狀由 Rust 產生，這裡管飄動和亮度）
   tendrils: {
     waveSpeed: 1.6,            // 觸手波動的速度
-    waveAmp: 0.24,             // 波動幅度（越往末端越大）
-    droop: 0.5,                // 漂浮時往下垂的量（飛行時被氣流拉直，垂得比較少）
-    turnLag: 0.35,             // 轉彎時觸手往外甩的量
-    brightness: 1.0,           // 亮度
+    waveAmp: 0.12,             // 波動幅度（越往末端越大）
+    droop: 0.2,                // 漂浮時往下垂的量（飛行時被氣流拉直，垂得比較少）
+    turnLag: 0.2,              // 轉彎時觸手往外甩的量
+    brightness: 0.6,           // 亮度
     sporeShare: 0.6,           // 孢子有多少比例是從觸手末端的孢子囊灑出來的（其餘從身體裡的菌絲）
   },
   // 感光點
   eyeSpots: {
-    glow: 0.9,                 // 外圈微光的亮度
+    glow: 1.0,                 // 光點的亮度
     sleepGlow: 0.15,           // 睡著時剩多少（像閉上眼睛）
   },
 
@@ -314,16 +314,11 @@ void main() {
     return;
   }
 
-  if (u_mat == 6) {                    // 感光點：深色的中心（吸收光）+ 一圈淡淡的微光 + 像鏡片一樣的反光
+  if (u_mat == 6) {                    // 感光點：單色藍綠色的小小光點，中間亮、往外柔和地淡出
     float r = v_uv.x;
-    float aa = fwidth(r) + 1e-3;
-    float pupil = 1.0 - smoothstep(0.42 - aa, 0.42 + aa, r);
-    float ring = smoothstep(0.3, 0.55, r) * (1.0 - smoothstep(0.7, 1.0, r));
-    float I = u_eyeGlow * (0.55 + 0.45 * energyAt(0.1));
-    float gloss = pow(max(dot(N, H), 0.0), 40.0) * pupil;
-    vec3 col = u_bodyColor * 0.05 * pupil + u_coreColor * ring * I * 1.3 + vec3(1.0) * gloss * 0.8;
-    float a = pupil * 0.8 + ring * I + gloss * 0.6;
-    o = vec4(col, clamp(a, 0.0, 1.0));
+    float I = u_eyeGlow * (0.6 + 0.4 * energyAt(0.1));
+    float dotA = 1.0 - smoothstep(0.35, 1.0, r);
+    o = vec4(u_coreColor * (0.4 + 0.8 * I), clamp(dotA * (0.25 + 0.6 * I), 0.0, 1.0));
     return;
   }
 
