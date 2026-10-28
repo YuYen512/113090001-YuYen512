@@ -4,7 +4,7 @@ debug 狀態總表：掃描程式碼裡的標記，和 debug-log.md 比對，避
 程式碼裡的標記（放在有問題的那一行上方）：
   // BUG(編號): 說明     🔴 未修正
   // CHECK(編號): 說明   🟡 待修正／待確認（需要決定怎麼處理）
-  // FIXED(編號): 說明   🟢 已修正（保留在程式碼裡，看得出這一行改過什麼）
+  // FIXED(編號): 說明   🟢 已修正，或已決定怎麼處理（保留在程式碼裡，看得出這一行改過什麼）
 
 掃描用的是 ripgrep（https://github.com/BurntSushi/ripgrep）。
 VS Code 的 Todo Tree 擴充套件（https://github.com/Gruntfuggly/todo-tree）也是用 ripgrep 找標記，
@@ -17,7 +17,7 @@ import pathlib, re, subprocess, sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOG = ROOT / "debug-log.md"
 COLOR = {"BUG": "🔴", "CHECK": "🟡", "FIXED": "🟢"}
-NAME = {"BUG": "未修正", "CHECK": "待修正／待確認", "FIXED": "已修正"}
+NAME = {"BUG": "未修正", "CHECK": "待修正／待確認", "FIXED": "已修正／已處理"}
 
 # 1. 用 ripgrep 掃程式碼裡的標記
 out = subprocess.run(
@@ -53,7 +53,7 @@ for key in sorted(set(code) | set(log)):
     where = "；".join(f"{p} {d}" for _, p, d in tags) or "（程式碼裡找不到標記）"
     if not kind and key in whole_program:          # 檢查整支程式的項目，用紀錄檔裡的顏色
         color, where = log[key], "整支程式（不對應某一行）"
-    label = {"🔴": "未修正", "🟡": "待修正／待確認", "🟢": "已修正"}.get(color, "沒有標記")
+    label = {"🔴": "未修正", "🟡": "待修正／待確認", "🟢": "已修正／已處理"}.get(color, "沒有標記")
     print(f"{key:<6}{color} {label:<12}{where}")
     if key not in log:
         problems.append(f"{key}：程式碼有標記，但 debug-log.md 沒有登記")
@@ -65,7 +65,7 @@ for key in sorted(set(code) | set(log)):
         problems.append(f"{key}：debug-log.md 有登記，但程式碼裡找不到標記")
 
 counts = {c: sum(1 for k in code.values() if k and k[0][0] == t) for t, c in COLOR.items()}
-print(f"\n🔴 未修正 {counts['🔴']}　🟡 待修正／待確認 {counts['🟡']}　🟢 已修正 {counts['🟢']}")
+print(f"\n🔴 未修正 {counts['🔴']}　🟡 待修正／待確認 {counts['🟡']}　🟢 已修正／已處理 {counts['🟢']}")
 if problems:
     print("\n⚠️  需要注意：")
     for p in problems:

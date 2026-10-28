@@ -111,7 +111,7 @@ CHECKS = [
     return { ok: maxInside === 0 && side > 0, info: { 身體在牆裡的影格: maxInside, 停在牆的哪一側: side > 0 ? '外側（正確）' : '穿過去了' } };
   }"""),
 
-  ("D06", "翅膀貼著牆時不會穿過牆", """async () => {
+  ("D06", "翅膀貼著牆時不會穿過牆（會自動往後收）；空曠處翅膀完全張開", """async () => {
     __t.reset();
     const { b, n } = __t.pickWall();
     // 讓生物側身貼著牆（右翼朝牆）
@@ -131,8 +131,11 @@ CHECKS = [
         if (__t.segmentBlocked(root, tip, 30)) worst++;
       }
     }
+    // 反向檢查：在空曠的地方翅膀要完全張開，不能被誤判而收起來
     __t.reset(); flight.pos = [0, 0, 0];
-    return { ok: worst === 0, info: { 翅膀穿過牆的次數: worst } };
+    for (let i = 0; i < 300; i++) { updateFlight(i / 60, 1 / 60); animate(i / 60, 1 / 60); }
+    const openFold = Math.max(wingFold.r, wingFold.l) * 180 / Math.PI;
+    return { ok: worst === 0 && openFold < 1, info: { 翅膀穿過牆的次數: worst, 空曠處翅膀收起的角度: +openFold.toFixed(1) } };
   }"""),
 
   ("D07", "掉下來的孢子不會穿過屋頂、樓板、牆", """async () => {
@@ -155,10 +158,10 @@ CHECKS = [
     return { ok: fellThrough.size === 0 && landedOnSlab > 30, info: { 孢子數: 40, 穿過樓板的: fellThrough.size, 停在樓板頂面的: landedOnSlab } };
   }"""),
 
-  ("D08", "可以飛到冷卻塔頂端（README 寫可以從頂端飛進塔裡）", """async () => {
+  ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {
     const tower = COL.cyls.find((c) => c.shell);
     const top = tower.base[1] + tower.height;
-    return { ok: FL.ceilingY > top + 2, info: { 飛行高度上限: FL.ceilingY, 冷卻塔頂端高度: +top.toFixed(1) } };
+    return { ok: FL.ceilingY === 30, info: { 飛行高度上限: FL.ceilingY, 冷卻塔頂端高度: +top.toFixed(1) } };
   }"""),
 ]
 

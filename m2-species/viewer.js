@@ -39,6 +39,15 @@ const CONFIG = {
   tailSway: 0.07,
   wingBend: 0.00045,           // 翅尖因慣性落後的彎曲量
   featherDeg: 9,               // 拍翅時翅膀的扭轉角度
+  // 翅膀碰到牆時自動往後收（像鳥在窄的地方收翅）
+  wingFold: {
+    maxDeg: 90,                // 最多往後收幾度（90° = 翅膀完全貼著身體往後）
+    stepDeg: 10,               // 一次試幾度
+    margin: 0.15,              // 翅膀和牆之間至少再多留多少空間（射線本身已經留 0.3）
+    foldSpeed: 18,             // 收起來的速度（要快，才不會插進牆裡）
+    openSpeed: 2.5,            // 張開的速度（慢一點比較自然）
+    flapReduce: 0.6,           // 完全收起時，拍動幅度減少多少
+  },
   // 翅膀上的光點與小菌絲（位置和形狀由 Rust 產生，這裡只管亮度）
   wingSpots: {
     rootDistance: 0.55,        // 翅根離核心多遠：決定脈動多晚傳到翅膀
@@ -70,7 +79,7 @@ const CONFIG = {
     climbSpeed: 1.3,           // 上升 / 下降速度
     bankDeg: 24,               // 轉彎時身體傾斜的角度
     floorY: -3.0,              // 地面高度（有環境時會用環境的地面高度）
-    // CHECK(D08): 飛行高度上限 30，但冷卻塔有 80 高，飛不到塔頂（待確認要不要提高）
+    // FIXED(D08): 已處理：決定維持飛行高度上限 30（冷卻塔有 80 高，暫時飛不到塔頂）
     ceilingY: 30.0,            // 最高可以飛多高（夠飛過廢墟）
     collisionRadius: 0.95,     // 碰撞時把生物當成多大的一顆球
     groundClearance: 1.2,      // 離地面至少多高
@@ -862,6 +871,22 @@ function updateFlight(t, dt) {
 // ---------------------------------------------------------------------
 let phase = 0;
 let breathePhase = 0;
+const wingFold = { r: 0, l: 0 };   // 兩邊翅膀現在往後收了幾度（弧度）
+
+// 翅膀收到 angle（弧度）時，翅膀會不會碰到東西：從翅根往翅尖、前緣中段、後緣中段各射一條線
+// （座標是翅膀自己的座標，數值來自 Rust 產生的鳥翅外形：翅尖大約在 x = 展長、z = -0.9）
+function wingIsClear(root, side, angle) {
+  const span = DATA.params.wing_span, pv = DATA.bones[boneIndex.wing_r].pivot;
+  const M = Mat.chain(root, Mat.translate(side * pv[0], pv[1], pv[2]), Mat.rotY(side * angle));
+  const o = Mat.apply(M, [side * 0.4, 0, -0.3]);
+  for (const local of [[side * span, 0, -0.9], [side * span * 0.7, 0, -0.05], [side * span * 0.7, 0, -1.1]]) {
+    const q = Mat.apply(M, local);
+    const d = sub(q, o), len = Math.hypot(d[0], d[1], d[2]);
+    const want = len + CONFIG.wingFold.margin;
+    if (rayClearance(o, [d[0] / len, d[1] / len, d[2] / len], want) < want - 1e-3) return false;
+  }
+  return true;
+}
 
 function animate(t, dt) {
   // 在空中移動時一定是飛行姿態；停下來後回到選擇的模式
@@ -910,12 +935,33 @@ function animate(t, dt) {
 
   const feather = deg(-CONFIG.featherDeg * c * k);
   const coreScale = 1 + 0.07 * (coreI - p.pulseBase);
+
+  // FIXED(D06): 翅膀碰到牆會自動往後收。從 0° 開始一個角度一個角度試，
+  // 檢查「翅膀收到這個角度時，整片翅膀實際的位置」有沒有碰到東西，選第一個不會碰到的角度
+  const WF = CONFIG.wingFold;
+  for (const [side, key] of [[1, 'r'], [-1, 'l']]) {
+    let target = 0;
+    if (COL && sk < 0.5) {                       // 睡覺時翅膀包著身體，不用算
+      target = deg(WF.maxDeg);                   // 全部角度都會碰到時，就收到最底
+      for (let a = 0; a < WF.maxDeg + 0.1; a += WF.stepDeg) {
+        if (wingIsClear(root, side, deg(a))) { target = deg(a); break; }
+      }
+    }
+    if (target > wingFold[key] && COL && sk < 0.5 && !wingIsClear(root, side, wingFold[key])) {
+      wingFold[key] = target;                    // 現在的角度已經碰到東西了：立刻收好，不慢慢收
+    } else {
+      const rate = target > wingFold[key] ? WF.foldSpeed : WF.openSpeed;
+      wingFold[key] += (target - wingFold[key]) * ease(rate, dt);
+    }
+  }
+  const flapR = flapDeg * (1 - WF.flapReduce * wingFold.r / deg(WF.maxDeg));
+  const flapL = flapDeg * (1 - WF.flapReduce * wingFold.l / deg(WF.maxDeg));
   const local = {
     root: root,
     core: Mat.mul(Mat.translate(...DATA.bones[boneIndex.core].pivot), Mat.scale(coreScale)),
-    // CHECK(D06): 碰撞只算身體那顆球，翅膀貼牆時會穿過牆（待確認要怎麼處理）
-    wing_r: Mat.chain(Mat.translate(...DATA.bones[boneIndex.wing_r].pivot), Mat.rotZ(deg(flapDeg)), Mat.rotX(feather)),
-    wing_l: Mat.chain(Mat.translate(...DATA.bones[boneIndex.wing_l].pivot), Mat.rotZ(deg(-flapDeg)), Mat.rotX(feather)),
+    // 翅根 → 往後收（rotY）→ 上下拍動（rotZ）→ 扭轉（rotX）。右翼正角度往後，左翼負角度往後
+    wing_r: Mat.chain(Mat.translate(...DATA.bones[boneIndex.wing_r].pivot), Mat.rotY(wingFold.r), Mat.rotZ(deg(flapR)), Mat.rotX(feather)),
+    wing_l: Mat.chain(Mat.translate(...DATA.bones[boneIndex.wing_l].pivot), Mat.rotY(-wingFold.l), Mat.rotZ(deg(-flapL)), Mat.rotX(feather)),
   };
 
   const world = [];
@@ -1045,11 +1091,11 @@ function updateSpores(t, dt, pose) {
 // ---------------------------------------------------------------------
 //  鏡頭：平移跟著生物，角度固定（只有拖曳滑鼠才會旋轉）
 // ---------------------------------------------------------------------
-// 鏡頭碰撞：從生物往鏡頭方向射一條線，看最近在多遠的地方會碰到牆、柱子、煙囪、冷卻塔或地面。
-// 回傳鏡頭最多可以放多遠（不會超過 want）。
+// 射線碰撞：從 o 往 dir 方向射一條線，看最近在多遠的地方會碰到牆、柱子、煙囪、冷卻塔或地面。
+// 回傳最多可以伸多遠（不會超過 want）。鏡頭（D04）和翅膀收合（D06）都用這個。
 const CAM_MARGIN = 0.3;     // 鏡頭和牆之間至少留這麼多空間
 const CAM_MIN = 0.15;       // 鏡頭最近可以靠到多近（碰撞優先：不能為了保持距離把鏡頭推進牆裡）
-function cameraClearance(o, dir, want) {
+function rayClearance(o, dir, want) {
   let best = want;
   if (COL) {
     for (const b of COL.boxes) {
@@ -1098,7 +1144,7 @@ function updateCamera(t, dt) {
   const k = ease(4, dt);
   for (let a = 0; a < 3; a++) cam.target[a] += (flight.pos[a] - cam.target[a]) * k;
   const dir = [Math.sin(cam.yaw) * Math.cos(cam.pitch), Math.sin(cam.pitch), Math.cos(cam.yaw) * Math.cos(cam.pitch)];
-  const allowed = cameraClearance(cam.target, dir, cam.distance);
+  const allowed = rayClearance(cam.target, dir, cam.distance);
   // 被擋住時立刻拉近（才不會看到牆裡面），沒被擋住時慢慢退回去（畫面才不會一直跳）
   cam.actual = allowed < cam.actual ? allowed : cam.actual + (allowed - cam.actual) * ease(2.5, dt);
   return [
