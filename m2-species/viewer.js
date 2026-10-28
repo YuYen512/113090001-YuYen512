@@ -62,7 +62,7 @@ const CONFIG = {
     waveAmp: 0.12,             // 波動幅度（越往末端越大）
     droop: 0.2,                // 漂浮時往下垂的量（飛行時被氣流拉直，垂得比較少）
     turnLag: 0.2,              // 轉彎時觸手往外甩的量
-    brightness: 0.6,           // 亮度
+    brightness: 1.0,           // 亮度
     sporeShare: 0.6,           // 孢子有多少比例是從觸手末端的孢子囊灑出來的（其餘從身體裡的菌絲）
   },
   // 感光點
@@ -216,7 +216,7 @@ void main() {
     p.y += u_lift * a_w;
   } else if (u_mat == 5) {          // 尾巴觸手：根部跟著尾巴擺，越往末端飄得越多
     float t = fract(a_uv.y);
-    p += vec3(u_sway, u_lift, 0.0) + tendrilWave(t, floor(a_uv.y));
+    p += vec3(u_sway, u_lift, 0.0) * a_w + tendrilWave(t, floor(a_uv.y));
   } else if (u_mat == 1 || u_mat == 4) {   // 翅膀與翅膀上的光點：翅尖因慣性彎曲
     p.y += u_bend * a_w * a_w;
   }
@@ -303,13 +303,15 @@ void main() {
     return;
   }
 
-  if (u_mat == 5) {                    // 尾巴觸手：半透明的細絲，能量從菌絲一路流到末端的孢子囊
+  if (u_mat == 5) {                    // 尾巴觸手：和身體一樣的半透明質感（像身體延伸出去），能量淡淡流到末端的孢子囊
     float t = fract(v_uv.y);
     float dist = v_uv.x;
     float I = (u_pulseBase * 0.5 + u_pulseAmp * energyAt(dist)) * exp(-(dist - 1.2) * u_fade * 0.5);
-    float bulb = smoothstep(0.84, 0.9, t);                     // 末端的孢子囊比較亮
-    vec3 col = u_bodyColor * (0.06 + 0.25 * fres) + u_coreColor * (0.12 + 0.9 * I) * (0.55 + 0.9 * bulb);
-    float a = (0.16 + 0.5 * I) * (1.0 - 0.35 * t) + 0.25 * fres + bulb * (0.3 + 0.5 * I);
+    float bulb = smoothstep(0.84, 0.9, t);
+    vec3 base = u_bodyColor * (0.18 + 0.55 * diff);
+    vec3 col = base * (0.35 + 1.3 * fres) + film(fres * 1.2 + 0.15) * 0.22 * fres + vec3(1.0) * spec * 0.7
+             + u_coreColor * (coreLight * 1.3 + (0.15 + 0.6 * I) * (0.3 + bulb));
+    float a = 0.05 + 0.55 * fres + 0.35 * coreLight + spec * 0.5 + (0.1 + 0.3 * I) * (0.3 + bulb);
     o = vec4(col * u_tendrilBright, clamp(a, 0.0, 1.0));
     return;
   }
@@ -1446,11 +1448,9 @@ function frame(now) {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE);                 // 菌絲用加法混合，看起來在發光
       drawPart(parts.hyphae, pose, false);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      drawPart(parts.tendrils, pose, true);               // 觸手和身體一樣是半透明的，先畫，埋在身體裡的那段會被外殼蓋住
       drawPart(parts.body, pose, true);
       drawPart(parts.eye_spots, pose, false);              // 感光點貼在身體表面
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);                 // 觸手也用加法混合，看起來在發光
-      drawPart(parts.tendrils, pose, false);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     } },
     { d: dist(Mat.apply(pose.world[parts.wing_r.bone], [halfSpan, 0, 0])), draw: () => drawWing(parts.wing_r, parts.wing_glow_r, pose, 1) },
     { d: dist(Mat.apply(pose.world[parts.wing_l.bone], [-halfSpan, 0, 0])), draw: () => drawWing(parts.wing_l, parts.wing_glow_l, pose, -1) },

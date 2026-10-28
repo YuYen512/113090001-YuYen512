@@ -157,7 +157,7 @@ impl Default for CreatureConfig {
             wing_spot_fork_chance: 0.8,
             wing_spot_seed: 512,
 
-            tendril_count: 5,
+            tendril_count: 1,
             tendril_length: 0.7,
             tendril_spread: 0.2,
             tendril_radius: 0.009,
@@ -310,6 +310,14 @@ impl BodyShape {
     pub fn tail_weight(&self, z: f32) -> f32 {
         let t = (-z / self.half).clamp(0.0, 1.0);
         t * t
+    }
+
+    /// 身體在 z 處的半徑（超出頭尾就是 0）
+    pub fn radius_at_z(&self, z: f32) -> f32 {
+        if z.abs() >= self.half {
+            return 0.0;
+        }
+        self.radius_at_theta((-z / self.half).acos())
     }
 
     /// 身體中心軸在 z 處的高度（尾巴會微微往上翹）

@@ -6,7 +6,7 @@
 //! 每個頂點記錄：
 //!   uv.x = 沿著菌絲和觸手到核心的距離（讓核心的脈動一路流到觸手末端）
 //!   uv.y = 觸手編號 + 在觸手上的位置 t（0 根部 → 1 末端），檢視器用它讓每條觸手各自飄動
-//!   weight = t
+//!   weight = 和身體一樣的擺尾權重（越靠尾尖越大）
 
 use crate::creature::{BodyShape, CreatureConfig};
 use crate::hyphae::Rng;
@@ -36,13 +36,18 @@ pub fn build(cfg: &CreatureConfig, shape: &BodyShape) -> Tendrils {
         let a = 2.0 * PI * (k as f32 + rng.range(-0.2, 0.2)) / n as f32 + 0.4;
         let z0 = -shape.half * 0.9;
         let ring = shape.surface(z0, a);
+        // 只有一條時：從身體裡、尾巴的正中央開始，沿著水滴的尖端筆直往後延伸，像身體本身變長了
+        let single = n == 1;
+        let z0 = if single { -shape.half * 0.97 } else { z0 };
         let center = Vec3::new(0.0, shape.axis_y(z0), z0);
-        let start = center + (ring - center) * 0.55;
+        let start = if single { center } else { center + (ring - center) * 0.55 };
 
         // 方向：主要往後，稍微往外張開
         let out = (ring - center).normalize_or(Vec3::new(0.0, 1.0, 0.0));
-        let len = cfg.tendril_length * rng.range(0.75, 1.0);
-        let spread = cfg.tendril_spread * rng.range(0.7, 1.2);
+        // 長度是「露出尾尖之外」的長度，埋在身體裡的那一段另外加上去
+        let hidden = if single { shape.half + z0 } else { 0.0 };
+        let len = hidden + cfg.tendril_length * if single { 1.0 } else { rng.range(0.75, 1.0) };
+        let spread = if single { 0.0 } else { cfg.tendril_spread * rng.range(0.7, 1.2) };
         // 每條觸手的彎曲各不相同
         let (w1, w2) = (rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
         let side = Vec3::new(-out.y, out.x, 0.0);
@@ -72,12 +77,16 @@ pub fn build(cfg: &CreatureConfig, shape: &BodyShape) -> Tendrils {
             let stalk = cfg.tendril_radius + (cfg.tendril_radius * 0.3 - cfg.tendril_radius) * t;
             let u = ((t - 0.86) / 0.14).clamp(0.0, 1.0);
             let bulb = cfg.tendril_bulb * (PI * u).sin().max(0.0).sqrt();
-            let r = if i == SEGS { 0.0 } else { stalk.max(bulb) };
+            // 只有一條時：在身體裡的那段和身體一樣粗（稍微小一點點），身體收尖之後就接上細細的觸手，看不出接縫
+            let grow_in = smooth01(t / (0.6 * hidden / len).max(1e-3)); // 從身體裡的一個點慢慢長粗，接縫才不會有一圈邊
+            let body = if single { shape.radius_at_z(p.z) * 0.96 * grow_in } else { 0.0 };
+            let r = if i == SEGS { 0.0 } else { stalk.max(bulb).max(body) };
 
             for j in 0..SIDES {
                 let ang = 2.0 * PI * j as f32 / SIDES as f32;
                 let off = normal * (ang.cos() * r) + binormal * (ang.sin() * r);
-                mesh.add_vertex(p + off, [dist, k as f32 + t * 0.999], t);
+                // 權重和身體一樣（尾尖 = 1），根部才會和尾巴一起擺動
+                mesh.add_vertex(p + off, [dist, k as f32 + t * 0.999], shape.tail_weight(p.z));
             }
         }
         for i in 0..SEGS {
@@ -95,4 +104,9 @@ pub fn build(cfg: &CreatureConfig, shape: &BodyShape) -> Tendrils {
 
     mesh.compute_normals();
     Tendrils { mesh, tips }
+}
+
+fn smooth01(x: f32) -> f32 {
+    let t = x.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
