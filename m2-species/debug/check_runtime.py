@@ -39,7 +39,7 @@ window.__t = {
     const b = COL.boxes.find((b) => Math.abs(b.ax[1][1]) > 0.99 && b.h[0] > 3 && b.h[1] > 1 && b.h[2] < 0.5 && b.c[1] - groundHeightAt(b.c[0], b.c[2]) > 1.6 && b.c[1] < 6);
     return { b, n: b.ax[2] };
   },
-  reset() { keys.clear(); flight.speed = 0; flight.vy = 0; flight.turn = 0; setMode('fly'); },
+  reset() { keys.clear(); flight.speed = 0; flight.vy = 0; flight.turn = 0; stamina = 1; exhausted = false; setMode('fly'); },
 };
 """
 
@@ -156,6 +156,37 @@ CHECKS = [
     const landedOnSlab = onSlab.size;
     spores.length = 0; __t.reset();
     return { ok: fellThrough.size === 0 && landedOnSlab > 30, info: { 孢子數: 40, 穿過樓板的: fellThrough.size, 停在樓板頂面的: landedOnSlab } };
+  }"""),
+
+  ("D10", "體力循環：飛行會累 → 累倒自己睡著 → 太累時叫不醒 → 睡飽自己醒來", """async () => {
+    __t.reset(); flight.pos = [0, 0, 0];
+    const info = {};
+    // 1. 一直往前飛，體力會減少，累了之後飛得比較慢
+    keys.add('KeyW');
+    for (let i = 0; i < 60 * 30; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); }
+    info.飛30秒後的體力 = +stamina.toFixed(2);
+    const fastSpeed = flight.speed;
+    for (let i = 0; i < 60 * 20; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); }
+    info.累了的速度比 = +(flight.speed / fastSpeed).toFixed(2);
+    // 2. 繼續飛到累倒：自己進入睡覺
+    let n = 0;
+    while (mode !== 'sleep' && n++ < 60 * 30) { updateFlight(n / 60, 1 / 60); updateStamina(1 / 60); }
+    info.累倒後的模式 = mode; info.是累倒的 = exhausted;
+    // 3. 剛累倒時按方向鍵、Z 叫不醒
+    sleepBlend = 1;
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyZ' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyZ' }));
+    info.剛累倒時按鍵後的模式 = mode;
+    // 4. 睡著會恢復，睡飽自己醒來
+    n = 0;
+    while (mode === 'sleep' && n++ < 60 * 60) { sleepBlend = 1; updateStamina(1 / 60); }
+    info.醒來時的體力 = +stamina.toFixed(2); info.醒來後的模式 = mode;
+    __t.reset();
+    return { ok: info.飛30秒後的體力 < 0.6 && info.飛30秒後的體力 > 0.4 && info.累了的速度比 < 0.9
+               && info.累倒後的模式 === 'sleep' && info.是累倒的 && info.剛累倒時按鍵後的模式 === 'sleep'
+               && info.醒來後的模式 === 'hover' && info.醒來時的體力 >= 0.99, info };
   }"""),
 
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {

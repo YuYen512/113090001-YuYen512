@@ -101,6 +101,18 @@ const CONFIG = {
     groundClearance: 1.2,      // 離地面至少多高
   },
 
+  // 體力：飛行會累，睡覺會恢復
+  stamina: {
+    flyDrain: 1 / 60,          // 在空中移動時每秒消耗多少（1 = 全部）：一直飛大約 60 秒會累倒
+    flyIdleDrain: 1 / 240,     // 飛行模式停在原地拍翅膀，消耗得比較慢
+    hoverRecover: 1 / 180,     // 漂浮時慢慢恢復
+    sleepRecover: 1 / 25,      // 睡著時恢復得最快：從累倒到睡飽大約 25 秒
+    tiredBelow: 0.35,          // 體力低於多少開始看得出累（飛得慢、拍翅吃力、光變暗、慢慢往下掉）
+    slowest: 0.45,             // 累到極點時，最快速度剩原本的多少
+    sinkSpeed: 0.35,           // 累到極點時，沒有按上升會慢慢往下掉的速度
+    wakeAt: 0.5,               // 累倒睡著後，體力恢復到多少才叫得醒
+  },
+
   // 孢子：生物飛行時幫真菌散播
   spores: {
     max: 500,
@@ -733,13 +745,29 @@ let mode = CONFIG.startMode;
 let flyBlend = mode === 'fly' ? 1 : 0;
 let sleepBlend = 0;
 const statusEl = document.getElementById('status');
+const staminaBar = document.getElementById('staminaBar');
+const staminaText = document.getElementById('staminaText');
 const modeButtons = document.querySelectorAll('.seg button[data-mode]');
 function setMode(m) {
   mode = m;
   modeButtons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === m)));
 }
 setMode(mode);
-modeButtons.forEach((b) => b.addEventListener('click', () => { setMode(b.dataset.mode); b.blur(); }));
+
+// 體力：1 = 精神飽滿，0 = 累倒
+let stamina = 1;
+let exhausted = false;            // 是不是累倒才睡著的（累倒時要睡夠才叫得醒）
+let wakeBlockedAt = -10;          // 上一次想叫醒但叫不醒的時間（面板會短暫提示）
+// 想切換模式時都經過這裡：累倒睡著、體力還沒恢復夠時叫不醒
+function requestMode(m) {
+  if (exhausted && m !== 'sleep' && stamina < CONFIG.stamina.wakeAt) {
+    wakeBlockedAt = performance.now() / 1000;
+    return;
+  }
+  if (m !== 'sleep') exhausted = false;
+  setMode(m);
+}
+modeButtons.forEach((b) => b.addEventListener('click', () => { requestMode(b.dataset.mode); b.blur(); }));
 
 // 面板與「操作」資料夾可以收合
 function makeCollapsible(container, toggle) {
@@ -759,13 +787,13 @@ const keys = new Set();
 const CONTROL_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'ShiftLeft', 'ShiftRight'];
 window.addEventListener('keydown', (e) => {
   // FIXED(D03): 長按 M 時，按鍵自動重複（e.repeat）不再切換飛行／漂浮
-  if (e.code === 'KeyM') { if (!e.repeat) setMode(mode === 'fly' ? 'hover' : 'fly'); return; }
+  if (e.code === 'KeyM') { if (!e.repeat) requestMode(mode === 'fly' ? 'hover' : 'fly'); return; }
   // FIXED(D02): 長按 Z 時，按鍵自動重複（e.repeat）不再切換睡覺／醒來
-  if (e.code === 'KeyZ') { if (!e.repeat) setMode(mode === 'sleep' ? 'hover' : 'sleep'); return; }
+  if (e.code === 'KeyZ') { if (!e.repeat) requestMode(mode === 'sleep' ? 'hover' : 'sleep'); return; }
   if (CONTROL_KEYS.includes(e.code)) {
     e.preventDefault();
     keys.add(e.code);
-    if (mode === 'sleep') setMode('hover');      // 睡著時按方向鍵會叫醒牠
+    if (mode === 'sleep' && !e.repeat) requestMode('hover');   // 睡著時按方向鍵會叫醒牠（累倒時要睡夠才叫得醒）
   }
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
@@ -896,11 +924,14 @@ function updateFlight(t, dt) {
   const turnIn = awake ? (held('KeyA', 'ArrowLeft') ? 1 : 0) - (held('KeyD', 'ArrowRight') ? 1 : 0) : 0;
   const climb = awake ? (held('Space', 'KeyE') ? 1 : 0) - (held('ShiftLeft', 'ShiftRight', 'KeyQ') ? 1 : 0) : 0;
 
-  const targetSpeed = fwd > 0 ? FL.maxSpeed : fwd < 0 ? -0.35 * FL.maxSpeed : 0;
+  const vigor = staminaVigor();                // 累的時候飛得比較慢
+  const targetSpeed = (fwd > 0 ? FL.maxSpeed : fwd < 0 ? -0.35 * FL.maxSpeed : 0) * lerp(CONFIG.stamina.slowest, 1, vigor);
   flight.speed += (targetSpeed - flight.speed) * ease(fwd ? FL.accel : FL.accel * 1.6, dt);
   flight.turn += (turnIn * FL.turnRate - flight.turn) * ease(4, dt);
   flight.heading += flight.turn * dt;
-  flight.vy += (climb * FL.climbSpeed - flight.vy) * ease(3, dt);
+  // 累的時候爬升比較無力；沒按上升時會慢慢往下掉
+  const sink = awake && climb <= 0 && mode !== 'hover' ? -CONFIG.stamina.sinkSpeed * (1 - vigor) : 0;
+  flight.vy += (climb * FL.climbSpeed * lerp(0.5, 1, vigor) + sink - flight.vy) * ease(3, dt);
 
   const forward = [Math.sin(flight.heading), 0, Math.cos(flight.heading)];
   flight.vel = [forward[0] * flight.speed, flight.vy, forward[2] * flight.speed];
@@ -915,6 +946,38 @@ function updateFlight(t, dt) {
     if (into < -0.2) flight.speed *= 1 - 0.08 * Math.min(1, -into); // 正面撞上時稍微減速
   }
   flight.moving = Math.abs(flight.speed) > 0.15 || Math.abs(flight.vy) > 0.15 || Math.abs(flight.turn) > 0.15;
+}
+
+// ---------------------------------------------------------------------
+//  體力：飛行會消耗，漂浮慢慢恢復，睡覺恢復最快；累倒會自己睡著，睡飽會自己醒來
+// ---------------------------------------------------------------------
+// 累的程度換成 0～1：1 = 還有精神，0 = 累到極點（體力低於 tiredBelow 才開始往下降）
+function staminaVigor() {
+  return smooth(Math.max(0, Math.min(1, stamina / CONFIG.stamina.tiredBelow)));
+}
+
+function updateStamina(dt) {
+  const ST = CONFIG.stamina;
+  if (mode === 'sleep') {
+    if (sleepBlend > 0.95) stamina += ST.sleepRecover * dt;      // 真的睡著了才開始恢復
+  } else if (flight.moving) {
+    stamina -= ST.flyDrain * dt;
+  } else if (mode === 'fly') {
+    stamina -= ST.flyIdleDrain * dt;
+  } else {
+    stamina += ST.hoverRecover * dt;
+  }
+  stamina = Math.max(0, Math.min(1, stamina));
+
+  if (stamina <= 0 && mode !== 'sleep') {                       // 累倒了：自己睡著
+    exhausted = true;
+    keys.clear();
+    setMode('sleep');
+  }
+  if (exhausted && mode === 'sleep' && stamina >= 1) {          // 累倒的那一次，睡飽了會自己醒來
+    exhausted = false;
+    setMode('hover');
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -954,6 +1017,15 @@ function animate(t, dt) {
   for (const key of Object.keys(H)) p[key] = lerp(lerp(H[key], F[key], k), SL[key], sk);
   const speedFrac = Math.max(0, flight.speed) / FL.maxSpeed;
   p.flapFreq *= 1 + 0.25 * speedFrac;          // 飛快一點時拍得稍微快一些
+  // 累了：拍翅變慢、變小，核心的脈動變弱變暗（睡著時不受影響，改成看恢復了多少）
+  const vigor = staminaVigor();
+  const tired = (1 - vigor) * (1 - sk);
+  p.flapFreq *= 1 - 0.35 * tired;
+  p.flapAmp *= 1 - 0.3 * tired;
+  p.pulseAmp *= 1 - 0.65 * tired;
+  p.pulseBase *= 1 - 0.4 * tired;
+  p.bob *= 1 + 1.2 * tired;                     // 飛得搖搖晃晃
+  p.pulseAmp *= lerp(1, 0.6 + 0.4 * stamina, sk);  // 睡著時，越睡越飽，光也慢慢回來
 
   // 用累加相位，切換頻率時翅膀才不會突然跳動
   phase += 2 * Math.PI * p.flapFreq * dt;
@@ -975,7 +1047,7 @@ function animate(t, dt) {
 
   const bob = -p.bob * Math.sin(phase - 0.6) + 0.06 * Math.sin(t * 0.7);
   const noseDownAwake = -p.pitchDeg + 2.5 * s * k + 8 * speedFrac - 14 * (flight.vy / FL.climbSpeed);
-  const noseDown = lerp(noseDownAwake, 90, sk);  // 睡覺：翻成頭朝下、尾巴朝上
+  const noseDown = lerp(noseDownAwake + 10 * tired, 90, sk);   // 累的時候頭垂下來一點  // 睡覺：翻成頭朝下、尾巴朝上
   const bank = -FL.bankDeg * (flight.turn / FL.turnRate) * (1 - sk);
   const swing = 3 * Math.sin(t * 0.5) * (1 - sk) + 2.5 * Math.sin(t * 0.33) * sk;   // 睡著時飄在空中輕輕晃
   const root = Mat.chain(
@@ -1041,7 +1113,7 @@ function animate(t, dt) {
     breath: lerp(0.012 * Math.sin(t * 1.1), 0.02 * Math.sin(breathePhase), sk),
     bend: -CONFIG.wingBend * flapVel,
     phase, pulsePhase, pulseFreq: p.flapFreq / N, fly: k, pulseBase: p.pulseBase, pulseAmp: p.pulseAmp,
-    sleep: sk, breathePhase, breatheSpeed, glowScale: lerp(1, SL.glow, sk), tendril,
+    sleep: sk, breathePhase, breatheSpeed, glowScale: lerp(1, SL.glow, sk) * (1 - 0.5 * tired), tendril, tired,
     eyeGlow: CONFIG.eyeSpots.glow * lerp(1, CONFIG.eyeSpots.sleepGlow, sk),
   };
 }
@@ -1114,7 +1186,7 @@ function pushSporeOut(p) {
 }
 
 function updateSpores(t, dt, pose) {
-  const rate = lerp(SP.hoverRate, SP.flyRate, pose.fly) * (0.3 + 1.4 * pose.wave) * (1 - pose.sleep);
+  const rate = lerp(SP.hoverRate, SP.flyRate, pose.fly) * (0.3 + 1.4 * pose.wave) * (1 - pose.sleep) * (1 - 0.6 * (pose.tired || 0));
   let toSpawn = rate * dt;
   const rootM = pose.world[0];
   const back = [-Math.sin(flight.heading), 0, -Math.cos(flight.heading)];
@@ -1291,6 +1363,7 @@ function frame(now) {
   gl.viewport(0, 0, canvas.width, canvas.height);
 
   updateFlight(t, dt);
+  updateStamina(dt);
   const eye = updateCamera(t, dt);
   const aspect = canvas.width / canvas.height;
   const view = Mat.lookAt(eye, cam.target, [0, 1, 0]);
@@ -1299,10 +1372,18 @@ function frame(now) {
   const corePos = Mat.apply(pose.world[boneIndex.core], [0, 0, 0]);
   updateSpores(t, dt, pose);
 
-  const statusText = mode === 'sleep' ? (pose.sleep > 0.95 ? '睡覺中' : '準備入睡…')
+  let statusText = mode === 'sleep' ? (pose.sleep > 0.95 ? (exhausted ? '累倒了，睡覺恢復中' : '睡覺中') : (exhausted ? '累倒了…' : '準備入睡…'))
     : pose.sleep > 0.05 ? '醒來中…'
     : flight.moving ? '飛行中 · 移動' : (pose.fly > 0.5 ? '飛行中' : '漂浮中');
+  if (mode !== 'sleep' && stamina < CONFIG.stamina.tiredBelow) statusText += ' · 累了';
+  if (now / 1000 - wakeBlockedAt < 1.5) statusText = '太累了，叫不醒…';
   if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
+  const pct = Math.round(stamina * 100);
+  if (staminaText.textContent !== pct + '%') {
+    staminaText.textContent = pct + '%';
+    staminaBar.style.width = pct + '%';
+    staminaBar.classList.toggle('low', stamina < CONFIG.stamina.tiredBelow);
+  }
 
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
