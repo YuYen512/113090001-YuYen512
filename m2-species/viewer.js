@@ -967,6 +967,21 @@ const COL = ENV && ENV.colliders ? {
   cyls: ENV.colliders.cylinders,
 } : null;
 
+// FIXED(D15): 轉視角時鏡頭會突然拉近：鏡頭和生物之間只要有東西就會被拉到它前面，
+// 連看得穿的鐵絲網、細細的柱子和樹幹也算。改成鏡頭只躲「真的會擋住視線的牆和建築」，
+// 下面這兩種鏡頭不躲（生物本身的碰撞不受影響，還是會被擋住）：
+//   - 很薄的板子：鐵絲網的網面（看得穿）
+//   - 細桿子，不管直的還是倒的：鐵絲網柱子（包括被藤蔓拉倒的）、車窗框
+//   - 直立的細長東西：樹幹、鋼柱（轉過去時只擋住一小條畫面）
+if (COL) {
+  for (const b of COL.boxes) {
+    const sorted = b.h.slice().sort((x, y) => x - y);
+    const longest = b.h.indexOf(sorted[2]);
+    const upright = Math.abs(b.ax[longest][1]) > 0.8;
+    b.cameraIgnores = sorted[0] < 0.1 || sorted[1] < 0.3 || (upright && sorted[1] < 1.5);
+  }
+}
+
 const GROUND = ENV ? {
   pos: ENV.parts.find((p) => p.name === 'ground').mesh.positions,
   n: ENV.params.ground_grid,
@@ -1688,10 +1703,12 @@ function updateFungi(dt) {
 // 回傳最多可以伸多遠（不會超過 want）。鏡頭（D04）和翅膀收合（D06）都用這個。
 const CAM_MARGIN = 0.3;     // 鏡頭和牆之間至少留這麼多空間
 const CAM_MIN = 0.15;       // 鏡頭最近可以靠到多近（碰撞優先：不能為了保持距離把鏡頭推進牆裡）
-function rayClearance(o, dir, want) {
+// forCamera = true：給鏡頭用的，忽略看得穿或很細的東西（見上面 D15）
+function rayClearance(o, dir, want, forCamera = false) {
   let best = want;
   if (COL) {
     for (const b of COL.boxes) {
+      if (forCamera && b.cameraIgnores) continue;
       // 先粗略排除：方塊離這條線太遠就不用細算
       const cx = b.c[0] - o[0], cy = b.c[1] - o[1], cz = b.c[2] - o[2];
       const tc = Math.max(0, Math.min(best, cx * dir[0] + cy * dir[1] + cz * dir[2]));
@@ -1737,7 +1754,7 @@ function updateCamera(t, dt) {
   const k = ease(4, dt);
   for (let a = 0; a < 3; a++) cam.target[a] += (flight.pos[a] - cam.target[a]) * k;
   const dir = [Math.sin(cam.yaw) * Math.cos(cam.pitch), Math.sin(cam.pitch), Math.cos(cam.yaw) * Math.cos(cam.pitch)];
-  const allowed = rayClearance(cam.target, dir, cam.distance);
+  const allowed = rayClearance(cam.target, dir, cam.distance, true);
   // 被擋住時立刻拉近（才不會看到牆裡面），沒被擋住時慢慢退回去（畫面才不會一直跳）
   cam.actual = allowed < cam.actual ? allowed : cam.actual + (allowed - cam.actual) * ease(2.5, dt);
   return [

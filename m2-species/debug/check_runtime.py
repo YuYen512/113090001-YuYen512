@@ -260,6 +260,34 @@ CHECKS = [
     return { ok, info };
   }"""),
 
+  ("D15", "轉視角時，鏡頭不會因為鐵絲網、柱子、樹幹而突然拉近（真的牆還是會擋，見 D04）", """async () => {
+    const sorted = (b) => b.h.slice().sort((a, c) => a - c);
+    const vertical = (b) => { const k = b.h.indexOf(Math.max(...b.h)); return Math.abs(b.ax[k][1]) > 0.8; };
+    const thin = COL.boxes.filter((b) => sorted(b)[0] < 0.1 || sorted(b)[1] < 0.3 || (vertical(b) && sorted(b)[1] < 1.5));
+    let snaps = 0, tested = 0, closest = Infinity;
+    // 每隔幾個挑一個：生物放在它旁邊，鏡頭繞一整圈
+    for (let i = 0; i < thin.length; i += Math.max(1, Math.floor(thin.length / 120))) {
+      const b = thin[i];
+      const side = b.ax[b.h.indexOf(Math.min(...b.h))];
+      const p = [b.c[0] + side[0] * 2.5, Math.max(b.c[1], groundHeightAt(b.c[0], b.c[2]) + 2), b.c[2] + side[2] * 2.5];
+      resolveCollisions(p, FL.collisionRadius);
+      flight.pos = p.slice(); cam.target = p.slice(); cam.distance = 6.4; cam.pitch = 0.22; cam.actual = 6.4;
+      let prev = 6.4, snapped = false;
+      for (let d = 0; d < 360; d++) {
+        cam.yaw = d * Math.PI / 180;
+        updateCamera(0, 1 / 60);
+        if (prev - cam.actual > 1.5) snapped = true;     // 一幀之內拉近超過 1.5 公尺 = 突然拉近
+        prev = cam.actual;
+      }
+      // 那一圈裡，如果附近剛好有真的牆，被拉近是對的：只算「沒有牆也被拉近」的情況
+      const realWall = COL.boxes.some((w) => !w.cameraIgnores && Math.hypot(w.c[0] - p[0], w.c[2] - p[2]) < w.r + 6.4);
+      if (snapped && !realWall) snaps++;
+      if (!realWall) { tested++; closest = Math.min(closest, cam.actual); }
+    }
+    __t.reset(); flight.pos = [0, 0, 0];
+    return { ok: snaps === 0 && tested >= 10, info: { 測了幾個細的東西旁邊: tested, 突然拉近的次數: snaps } };
+  }"""),
+
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {
     const tower = COL.cyls.find((c) => c.shell);
     const top = tower.base[1] + tower.height;
