@@ -83,6 +83,26 @@ const CONFIG = {
     wind: 0.6,                       // 草和藤被風吹動的幅度
   },
 
+  // 晝夜：人類不在了，夜裡沒有一盞燈，滿天星星；地上唯一的光是牠和真菌
+  dayNight: {
+    dayLength: 360,            // 一整天（白天 + 夜晚）是幾秒
+    startHour: 21.5,           // 一打開是幾點（21.5 = 晚上 9 點半）
+    fastForward: 30,           // 按 T 快轉的倍數
+    dayDrainMul: 3,            // 白天硬要醒著飛，體力消耗是晚上的幾倍
+    // 白天的光
+    sunColor: [1.0, 0.93, 0.8],
+    daySkyAmbient: [0.42, 0.47, 0.53],
+    dayGroundAmbient: [0.16, 0.15, 0.13],
+    // 天空的顏色：天頂、地平線（地平線的顏色也是霧的顏色，遠方才會自然地融進天空）
+    nightTop: [0.008, 0.016, 0.035],
+    dayTop: [0.22, 0.42, 0.7],
+    dayHorizon: [0.6, 0.67, 0.73],
+    duskTop: [0.16, 0.17, 0.32],
+    duskHorizon: [0.72, 0.42, 0.3],
+    stars: 1.0,                // 星星的亮度
+    moonStrength: 0.5,         // 月光的強度（太亮地面會白得像雪）
+  },
+
   camera: { distance: 6.4, yaw: 0.85, pitch: 0.22, fov: 42, min: 2.6, max: 16 },
   lightDir: [0.45, 0.9, 0.55],
   moteCount: 320,
@@ -396,21 +416,72 @@ void main() {
   v_uv = p;
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
+// 天空：顏色隨時間變化；夜裡是沒有光害的星空和銀河，白天有太陽（鏡頭轉動時天空跟著轉）
 const BG_FS = `#version 300 es
 precision highp float;
-in vec2 v_uv; uniform float u_aspect; out vec4 o;
+in vec2 v_uv; out vec4 o;
+uniform vec3 u_camF, u_camR, u_camU;      // 鏡頭的前、右、上
+uniform float u_tanH, u_aspect, u_time;
+uniform vec3 u_top, u_horizon, u_sunDir, u_moonDir, u_twiColor;
+uniform float u_day, u_twi, u_stars;
+
+float hash3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float noise3(vec3 x) {
+  vec3 i = floor(x); vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hash3(i), hash3(i + vec3(1,0,0)), f.x), mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x), mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+// 一層星星：把天空切成小格子，每格有一定機會放一顆星
+float starLayer(vec3 d, float scale, float chance, float size) {
+  vec3 p = d * scale;
+  vec3 c = floor(p);
+  if (hash3(c) > chance) return 0.0;
+  vec3 sp = normalize(c + 0.5 + (vec3(hash3(c + 1.7), hash3(c + 3.1), hash3(c + 5.3)) - 0.5) * 0.7) * scale;
+  float dist = length(p - sp);
+  float bright = 0.35 + 0.65 * hash3(c + 9.1);
+  float twinkle = 0.75 + 0.25 * sin(u_time * (1.5 + 3.0 * hash3(c + 4.4)) + hash3(c) * 40.0);
+  return smoothstep(size, 0.0, dist) * bright * twinkle;
+}
+
 void main() {
-  vec3 top = vec3(0.035, 0.075, 0.12), bottom = vec3(0.008, 0.02, 0.035);
-  vec3 c = mix(bottom, top, smoothstep(0.0, 1.0, v_uv.y));
-  vec2 q = (v_uv - vec2(0.5, 0.55)) * vec2(u_aspect, 1.0);
-  c += vec3(0.03, 0.08, 0.09) * exp(-dot(q, q) * 3.0);
+  vec2 ndc = v_uv * 2.0 - 1.0;
+  vec3 d = normalize(u_camF + u_camR * ndc.x * u_tanH * u_aspect + u_camU * ndc.y * u_tanH);
+  float up = max(d.y, 0.0);
+  vec3 c = mix(u_horizon, u_top, pow(up, 0.55));
+
+  // 黃昏、黎明：太陽那一側的地平線染成橘紅
+  vec2 hz = normalize(d.xz + 1e-5), sz = normalize(u_sunDir.xz + 1e-5);
+  float toward = pow(max(dot(hz, sz), 0.0), 2.0);
+  c += u_twiColor * u_twi * exp(-up * 5.0) * (0.25 + 0.75 * toward);
+
+  // 星星和銀河：只有夜裡看得到，靠近地平線被霧氣遮住
+  float night = u_stars * (1.0 - u_day) * smoothstep(-0.02, 0.18, d.y);
+  if (night > 0.001) {
+    float band = exp(-pow(dot(d, normalize(vec3(0.35, 0.55, 0.76))) / 0.2, 2.0));
+    float cloud = noise3(d * 7.0) * 0.6 + noise3(d * 19.0) * 0.4;
+    vec3 milky = vec3(0.1, 0.11, 0.15) * band * smoothstep(0.35, 0.8, cloud);
+    float st = starLayer(d, 140.0, 0.05 + 0.08 * band, 0.2) * 0.9
+             + starLayer(d, 70.0, 0.012, 0.16) * 1.6
+             + starLayer(d, 260.0, 0.06 * band, 0.25) * 0.5;
+    c += (milky + vec3(0.85, 0.9, 1.0) * st) * night;
+  }
+
+  // 月亮（夜裡）和太陽（白天）
+  float md = dot(d, u_moonDir);
+  float moonUp = smoothstep(-0.05, 0.05, u_moonDir.y) * (1.0 - u_day * 0.85);
+  c += vec3(0.8, 0.83, 0.9) * smoothstep(0.99962, 0.9998, md) * moonUp;
+  c += vec3(0.25, 0.3, 0.4) * pow(max(md, 0.0), 400.0) * 0.5 * moonUp;
+  float sd = dot(d, u_sunDir);
+  float sunUp = smoothstep(-0.08, 0.04, u_sunDir.y);
+  c += vec3(1.0, 0.95, 0.85) * smoothstep(0.9993, 0.9996, sd) * sunUp * 2.0;
+  c += vec3(1.0, 0.85, 0.6) * (pow(max(sd, 0.0), 60.0) * 0.35 + pow(max(sd, 0.0), 6.0) * 0.08) * sunUp;
   o = vec4(c, 1.0);
 }`;
 
 // 背景微光粒子：在鏡頭周圍的一個箱子裡循環，飛多遠都看得到
 const MOTE_VS = `#version 300 es
 layout(location=0) in vec4 a_mote;   // xyz + 隨機種子
-uniform mat4 u_view, u_proj; uniform float u_time, u_scale; uniform vec3 u_center;
+uniform mat4 u_view, u_proj; uniform float u_time, u_scale, u_night; uniform vec3 u_center;
 out float v_a;
 void main() {
   float sd = a_mote.w;
@@ -422,7 +493,7 @@ void main() {
   vec4 vp = u_view * vec4(p, 1.0);
   gl_Position = u_proj * vp;
   gl_PointSize = u_scale * (0.6 + sd) / max(-vp.z, 0.5);
-  v_a = edge * (0.35 + 0.65 * fract(sd * 7.3)) * (0.6 + 0.4 * sin(u_time * (0.5 + sd) + sd * 20.0));
+  v_a = edge * (0.35 + 0.65 * fract(sd * 7.3)) * (0.6 + 0.4 * sin(u_time * (0.5 + sd) + sd * 20.0)) * mix(0.15, 1.0, u_night);
 }`;
 const MOTE_FS = `#version 300 es
 precision highp float;
@@ -485,7 +556,9 @@ vec3 fogged(vec3 c) {
 
 void main() {
   vec3 N = normalize(v_nrm);
-  if (!gl_FrontFacing) N = -N;
+  // FIXED(D11): 原本用「是不是正面」決定要不要翻轉法線，地面的三角形是反面朝上，法線被翻成朝下，
+  // 所以地面從來沒被月光（現在加上的太陽）照到，白天也是黑的。改成「朝向鏡頭的那一面」才翻。
+  if (dot(N, u_camPos - v_wpos) < 0.0) N = -N;
 
   if (u_mat == 1) {                       // 鐵絲網：菱形網格，遠處變成半透明的一片
     vec2 uv = v_uv;
@@ -747,6 +820,7 @@ let sleepBlend = 0;
 const statusEl = document.getElementById('status');
 const staminaBar = document.getElementById('staminaBar');
 const staminaText = document.getElementById('staminaText');
+const clockEl = document.getElementById('clock');
 const modeButtons = document.querySelectorAll('.seg button[data-mode]');
 function setMode(m) {
   mode = m;
@@ -764,7 +838,7 @@ function requestMode(m) {
     wakeBlockedAt = performance.now() / 1000;
     return;
   }
-  if (m !== 'sleep') exhausted = false;
+  if (m !== 'sleep') { exhausted = false; daySleep = false; }    // 你叫醒牠（白天也可以，只是很耗體力）
   setMode(m);
 }
 modeButtons.forEach((b) => b.addEventListener('click', () => { requestMode(b.dataset.mode); b.blur(); }));
@@ -790,6 +864,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM') { if (!e.repeat) requestMode(mode === 'fly' ? 'hover' : 'fly'); return; }
   // FIXED(D02): 長按 Z 時，按鍵自動重複（e.repeat）不再切換睡覺／醒來
   if (e.code === 'KeyZ') { if (!e.repeat) requestMode(mode === 'sleep' ? 'hover' : 'sleep'); return; }
+  if (e.code === 'KeyT') { if (!e.repeat) dayClock.speed = dayClock.speed > 1 ? 1 : DN.fastForward; return; }   // 時間快轉
   if (CONTROL_KEYS.includes(e.code)) {
     e.preventDefault();
     keys.add(e.code);
@@ -949,6 +1024,68 @@ function updateFlight(t, dt) {
 }
 
 // ---------------------------------------------------------------------
+//  晝夜：太陽東升西落，夜裡月亮和星星；牠白天睡覺、晚上活動
+// ---------------------------------------------------------------------
+const DN = CONFIG.dayNight;
+// phase：一天裡的位置，0 = 半夜 12 點、0.25 = 早上 6 點日出、0.5 = 中午、0.75 = 傍晚 6 點日落
+const dayClock = { phase: DN.startHour / 24, speed: 1, frozen: false };
+let daySleep = false;              // 是不是因為天亮才睡的（天黑會自己醒來）
+const sunHeight = (phase) => Math.sin((phase - 0.25) * Math.PI * 2);
+const isDaytime = () => sunHeight(dayClock.phase) > 0;
+
+function updateDayNight(dt) {
+  const wasDay = isDaytime();
+  if (!dayClock.frozen) dayClock.phase = (dayClock.phase + dt * dayClock.speed / DN.dayLength) % 1;
+  const nowDay = isDaytime();
+  if (!wasDay && nowDay) {                 // 天亮了：回去睡覺
+    daySleep = true;
+    if (mode !== 'sleep') { keys.clear(); setMode('sleep'); }
+  }
+  if (wasDay && !nowDay && daySleep) {     // 天黑了：醒來活動（累倒時還是要睡夠才會醒）
+    daySleep = false;
+    if (mode === 'sleep' && !(exhausted && stamina < CONFIG.stamina.wakeAt)) { exhausted = false; setMode('hover'); }
+  }
+}
+
+// 這個時間的天空和光線
+function skyState(phase) {
+  const E = CONFIG.environment;
+  const a = (phase - 0.25) * Math.PI * 2;
+  const h = Math.sin(a);
+  const sunDir = norm([Math.cos(a) * 0.9, h, 0.35]);
+  const moonDir = norm([-sunDir[0], Math.max(-sunDir[1], -0.2) + 0.35, -0.3]);
+  const day = smooth(Math.max(0, Math.min(1, (h + 0.05) / 0.35)));
+  const twi = Math.exp(-Math.pow(h / 0.16, 2));
+  const mix3 = (x, y, t) => [lerp(x[0], y[0], t), lerp(x[1], y[1], t), lerp(x[2], y[2], t)];
+  const add3 = (x, y, k) => [x[0] + y[0] * k, x[1] + y[1] * k, x[2] + y[2] * k];
+  // 主要的光：白天是太陽，夜裡是月亮；日出日落時光很弱、偏橘
+  // 太陽在地平線上時用太陽、下面時用月亮；兩個在地平線附近都淡到 0，交接時才不會突然跳一下
+  const sunW = smooth(Math.max(0, Math.min(1, h / 0.25)));
+  const moonW = smooth(Math.max(0, Math.min(1, -h / 0.2)));
+  const lightDir = h > 0 ? sunDir : moonDir;
+  let lightColor = h > 0 ? DN.sunColor.map((x) => x * sunW) : E.moonColor.map((x) => x * moonW * DN.moonStrength);
+  lightColor = add3(lightColor, DN.duskHorizon, twi * 0.2);
+  let horizon = mix3(E.fogColor, DN.dayHorizon, day);
+  horizon = mix3(horizon, DN.duskHorizon, twi * 0.75);
+  let top = mix3(DN.nightTop, DN.dayTop, day);
+  top = mix3(top, DN.duskTop, twi * 0.5);
+  return {
+    sunDir, moonDir, day, twi, lightDir, lightColor, top, horizon,
+    fogColor: horizon,
+    skyAmb: mix3(E.skyAmbient, DN.daySkyAmbient, day),
+    groundAmb: mix3(E.groundAmbient, DN.dayGroundAmbient, day),
+  };
+}
+
+// 面板上顯示的時間
+function clockText() {
+  const hours = dayClock.phase * 24;
+  const hh = Math.floor(hours), mm = Math.floor((hours - hh) * 60);
+  const name = hours < 5 ? '深夜' : hours < 7 ? '黎明' : hours < 17 ? '白天' : hours < 19 ? '黃昏' : '夜晚';
+  return `${name} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}${dayClock.speed > 1 ? ' ▸▸' : ''}`;
+}
+
+// ---------------------------------------------------------------------
 //  體力：飛行會消耗，漂浮慢慢恢復，睡覺恢復最快；累倒會自己睡著，睡飽會自己醒來
 // ---------------------------------------------------------------------
 // 累的程度換成 0～1：1 = 還有精神，0 = 累到極點（體力低於 tiredBelow 才開始往下降）
@@ -961,11 +1098,11 @@ function updateStamina(dt) {
   if (mode === 'sleep') {
     if (sleepBlend > 0.95) stamina += ST.sleepRecover * dt;      // 真的睡著了才開始恢復
   } else if (flight.moving) {
-    stamina -= ST.flyDrain * dt;
+    stamina -= ST.flyDrain * dt * (isDaytime() ? DN.dayDrainMul : 1);   // 白天硬要飛，很耗體力
   } else if (mode === 'fly') {
-    stamina -= ST.flyIdleDrain * dt;
+    stamina -= ST.flyIdleDrain * dt * (isDaytime() ? DN.dayDrainMul : 1);
   } else {
-    stamina += ST.hoverRecover * dt;
+    stamina += ST.hoverRecover * dt * (isDaytime() ? 0 : 1);             // 白天漂浮也休息不到
   }
   stamina = Math.max(0, Math.min(1, stamina));
 
@@ -976,6 +1113,7 @@ function updateStamina(dt) {
   }
   if (exhausted && mode === 'sleep' && stamina >= 1) {          // 累倒的那一次，睡飽了會自己醒來
     exhausted = false;
+    if (daySleep) return;                                         // 但如果是白天，就繼續睡到天黑
     setMode('hover');
   }
 }
@@ -1364,6 +1502,8 @@ function frame(now) {
 
   updateFlight(t, dt);
   updateStamina(dt);
+  updateDayNight(dt);
+  const sky = skyState(dayClock.phase);
   const eye = updateCamera(t, dt);
   const aspect = canvas.width / canvas.height;
   const view = Mat.lookAt(eye, cam.target, [0, 1, 0]);
@@ -1375,7 +1515,11 @@ function frame(now) {
   let statusText = mode === 'sleep' ? (pose.sleep > 0.95 ? (exhausted ? '累倒了，睡覺恢復中' : '睡覺中') : (exhausted ? '累倒了…' : '準備入睡…'))
     : pose.sleep > 0.05 ? '醒來中…'
     : flight.moving ? '飛行中 · 移動' : (pose.fly > 0.5 ? '飛行中' : '漂浮中');
+  if (mode === 'sleep' && daySleep && pose.sleep > 0.95 && !exhausted) statusText = '白天 · 睡覺中（天黑會醒來）';
+  if (mode !== 'sleep' && isDaytime()) statusText += ' · 白天很耗體力';
   if (mode !== 'sleep' && stamina < CONFIG.stamina.tiredBelow) statusText += ' · 累了';
+  const ct = clockText();
+  if (clockEl.textContent !== ct) clockEl.textContent = ct;
   if (now / 1000 - wakeBlockedAt < 1.5) statusText = '太累了，叫不醒…';
   if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
   const pct = Math.round(stamina * 100);
@@ -1393,7 +1537,18 @@ function frame(now) {
   gl.disable(gl.DEPTH_TEST);
   gl.disable(gl.BLEND);
   gl.useProgram(progBg.program);
-  gl.uniform1f(progBg.u.u_aspect, aspect);
+  {
+    const bu = progBg.u;
+    const f = norm(sub(cam.target, eye)), r = norm(cross(f, [0, 1, 0])), uu = cross(r, f);
+    gl.uniform3fv(bu.u_camF, f); gl.uniform3fv(bu.u_camR, r); gl.uniform3fv(bu.u_camU, uu);
+    gl.uniform1f(bu.u_tanH, Math.tan(deg(CONFIG.camera.fov) / 2));
+    gl.uniform1f(bu.u_aspect, aspect);
+    gl.uniform1f(bu.u_time, t);
+    gl.uniform3fv(bu.u_top, sky.top); gl.uniform3fv(bu.u_horizon, sky.horizon);
+    gl.uniform3fv(bu.u_sunDir, sky.sunDir); gl.uniform3fv(bu.u_moonDir, sky.moonDir);
+    gl.uniform3fv(bu.u_twiColor, DN.duskHorizon);
+    gl.uniform1f(bu.u_day, sky.day); gl.uniform1f(bu.u_twi, sky.twi); gl.uniform1f(bu.u_stars, DN.stars);
+  }
   gl.bindVertexArray(emptyVao);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -1407,11 +1562,11 @@ function frame(now) {
     gl.uniform1f(eu.u_time, t);
     gl.uniform1f(eu.u_wind, E.wind);
     gl.uniform3fv(eu.u_camPos, eye);
-    gl.uniform3fv(eu.u_moonDir, norm(E.moonDir));
-    gl.uniform3fv(eu.u_moonColor, E.moonColor);
-    gl.uniform3fv(eu.u_skyAmb, E.skyAmbient);
-    gl.uniform3fv(eu.u_groundAmb, E.groundAmbient);
-    gl.uniform3fv(eu.u_fogColor, E.fogColor);
+    gl.uniform3fv(eu.u_moonDir, sky.lightDir);          // 主要的光（白天太陽、夜裡月亮）
+    gl.uniform3fv(eu.u_moonColor, sky.lightColor);
+    gl.uniform3fv(eu.u_skyAmb, sky.skyAmb);
+    gl.uniform3fv(eu.u_groundAmb, sky.groundAmb);
+    gl.uniform3fv(eu.u_fogColor, sky.fogColor);
     gl.uniform1f(eu.u_fogDensity, E.fogDensity);
     gl.uniform3fv(eu.u_corePos, corePos);
     gl.uniform3fv(eu.u_coreColor, colors.core);
@@ -1460,6 +1615,7 @@ function frame(now) {
   gl.uniformMatrix4fv(progMote.u.u_proj, false, proj);
   gl.uniform1f(progMote.u.u_time, t);
   gl.uniform1f(progMote.u.u_scale, 22 * canvas.height / 900);
+  gl.uniform1f(progMote.u.u_night, 1 - sky.day);
   gl.uniform3fv(progMote.u.u_center, cam.target);
   gl.bindVertexArray(moteVao);
   gl.drawArrays(gl.POINTS, 0, CONFIG.moteCount);

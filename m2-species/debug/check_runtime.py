@@ -39,7 +39,9 @@ window.__t = {
     const b = COL.boxes.find((b) => Math.abs(b.ax[1][1]) > 0.99 && b.h[0] > 3 && b.h[1] > 1 && b.h[2] < 0.5 && b.c[1] - groundHeightAt(b.c[0], b.c[2]) > 1.6 && b.c[1] < 6);
     return { b, n: b.ax[2] };
   },
-  reset() { keys.clear(); flight.speed = 0; flight.vy = 0; flight.turn = 0; stamina = 1; exhausted = false; setMode('fly'); },
+  // 檢查時把時間停在半夜（不然跑到一半天亮，生物會自己去睡覺，干擾其他項目）
+  reset() { keys.clear(); flight.speed = 0; flight.vy = 0; flight.turn = 0; stamina = 1; exhausted = false;
+            dayClock.frozen = true; dayClock.speed = 1; dayClock.phase = 0; daySleep = false; setMode('fly'); },
 };
 """
 
@@ -162,11 +164,13 @@ CHECKS = [
     __t.reset(); flight.pos = [0, 0, 0];
     const info = {};
     // 1. 一直往前飛，體力會減少，累了之後飛得比較慢
+    // 每一幀都把牠放回空曠的高空，只看體力對速度的影響（不會撞到場景裡的樹、車、牆而減速）
+    const open = () => { flight.pos = [0, 10, 0]; };
     keys.add('KeyW');
-    for (let i = 0; i < 60 * 30; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); }
+    for (let i = 0; i < 60 * 30; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); open(); }
     info.飛30秒後的體力 = +stamina.toFixed(2);
     const fastSpeed = flight.speed;
-    for (let i = 0; i < 60 * 20; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); }
+    for (let i = 0; i < 60 * 20; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); open(); }
     info.累了的速度比 = +(flight.speed / fastSpeed).toFixed(2);
     // 2. 繼續飛到累倒：自己進入睡覺
     let n = 0;
@@ -189,6 +193,31 @@ CHECKS = [
                && info.醒來後的模式 === 'hover' && info.醒來時的體力 >= 0.99, info };
   }"""),
 
+  ("D12", "晝夜：天亮自己去睡、天黑自己醒來；白天硬要飛，體力消耗是晚上的 3 倍", """async () => {
+    const info = {};
+    __t.reset(); flight.pos = [0, 0, 0];
+    // 1. 清晨 5:59 → 6:00 天亮
+    dayClock.frozen = false; dayClock.speed = 1; dayClock.phase = 0.2499;
+    updateDayNight(1);
+    info.天亮後的模式 = mode; info.是因為天亮才睡 = daySleep;
+    // 2. 傍晚 17:59 → 18:00 天黑
+    sleepBlend = 1; dayClock.phase = 0.7499;
+    updateDayNight(1);
+    info.天黑後的模式 = mode;
+    // 3. 白天和夜晚各往前飛 10 秒，比較體力消耗
+    const drain = (phase) => {
+      __t.reset(); flight.pos = [0, 0, 0]; dayClock.phase = phase; keys.add('KeyW');
+      for (let i = 0; i < 600; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); }
+      return 1 - stamina;
+    };
+    const night = drain(0.0), day = drain(0.5);
+    info.夜晚飛10秒消耗 = +night.toFixed(3); info.白天飛10秒消耗 = +day.toFixed(3);
+    info.倍數 = +(day / night).toFixed(2);
+    __t.reset();
+    return { ok: info.天亮後的模式 === 'sleep' && info.是因為天亮才睡 && info.天黑後的模式 === 'hover'
+               && Math.abs(info.倍數 - 3) < 0.15, info };
+  }"""),
+
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {
     const tower = COL.cyls.find((c) => c.shell);
     const top = tower.base[1] + tower.height;
@@ -209,6 +238,7 @@ async def main():
         await page.goto(PAGE)
         await page.wait_for_timeout(1500)
         await page.evaluate(HELPERS)
+        await page.evaluate("__t.reset()")
         results = []
         for code, name, js in CHECKS:
             if only and code not in only:

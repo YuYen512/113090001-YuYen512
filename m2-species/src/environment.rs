@@ -5,6 +5,7 @@
 //!   - 廢棄工廠：鏽蝕廠房、塌了一半的鋸齒屋頂、斷頂的煙囪
 //!   - 遠方兩座冷卻塔的剪影
 //!   - 歪斜破損的鐵絲網、刺鐵絲，網上掛著輻射警告牌
+//!   - 自然把人造物吞掉（overgrowth.rs）：樹從廢墟裡長出來、藤蔓把鐵絲網拉倒、汽車半埋在土裡長滿苔蘚
 //!
 //! 座標：y 朝上，地面大約在 y = -3。生物從原點附近出發。
 //! 位置、大小都集中在 EnvironmentConfig，想調整場景佈置改那裡就好。
@@ -17,6 +18,8 @@ use crate::hyphae::Rng;
 use crate::math::Vec3;
 use crate::mesh::Mesh;
 use std::f32::consts::{PI, TAU};
+
+mod overgrowth;
 
 const KIND_GROUND: f32 = 0.0;
 const KIND_CONCRETE: f32 = 1.0;
@@ -60,6 +63,10 @@ pub struct EnvironmentConfig {
     pub max_grass_blades: usize,
     /// 地上零散瓦礫的數量
     pub rubble_count: usize,
+    /// 廢棄汽車：(x, z, 朝向（度）)
+    pub cars: Vec<(f32, f32, f32)>,
+    /// 每段鐵絲網被藤蔓拉倒的柱子數
+    pub fence_collapse: usize,
 }
 
 impl Default for EnvironmentConfig {
@@ -86,6 +93,8 @@ impl Default for EnvironmentConfig {
             grass_density: 0.75,
             max_grass_blades: 7000,
             rubble_count: 160,
+            cars: vec![(9.0, 10.0, 30.0), (-15.0, 4.0, 110.0), (25.0, -3.0, -40.0), (-28.0, -5.0, 70.0), (3.0, -47.0, 15.0)],
+            fence_collapse: 3,
         }
     }
 }
@@ -624,6 +633,11 @@ fn build_ruin(cfg: &EnvironmentConfig, r: &Ruin, rng: &mut Rng, solid: &mut Soli
         let c = Vec3::new(p.x, gy + size * 0.25, p.z);
         if size > 1.0 { solid_box(solid, c, axes, half, &surf); } else { add_obox(&mut solid.mesh, c, axes, half, &surf); }
     }
+
+    // 一棵樹從建築裡長出來，比殘牆還高（人類離開之後過了幾十年）
+    let tp = local(rng.range(-hw * 0.35, hw * 0.35), 0.0, rng.range(-hd * 0.35, hd * 0.35));
+    let tree_h = rows as f32 * cell + rng.range(4.0, 8.0);
+    overgrowth::build_tree(cfg, rng, solid, plants, tp.x, tp.z, tree_h);
 }
 
 // ---------------------------------------------------------------------
@@ -672,9 +686,11 @@ fn build_factory(cfg: &EnvironmentConfig, rng: &mut Rng, solid: &mut Solid, plan
     // 鋸齒屋頂：每一排是一片斜屋頂，大約三分之一已經塌掉
     let teeth = 7;
     let tw = len / teeth as f32;
+    let mut hole_x = -len * 0.5 + tw * 2.5;      // 屋頂破洞的位置（樹從這裡長出來）
     for i in 0..teeth {
         let x0 = -len * 0.5 + i as f32 * tw;
         if rng.next_f32() < 0.35 {
+            hole_x = x0 + tw * 0.5;
             // 塌下來的屋頂斜插在廠房裡
             let axes = axes_yaw_tilt(yaw, rng.range(-0.3, 0.3), rng.range(0.4, 0.9));
             solid_box(solid, local(x0 + tw * 0.5, h * 0.35, rng.range(-wid * 0.3, wid * 0.3)), axes, [tw * 0.5, 0.15, wid * 0.3], &metal(rng));
@@ -724,6 +740,10 @@ fn build_factory(cfg: &EnvironmentConfig, rng: &mut Rng, solid: &mut Solid, plan
         let length = h * rng.range(0.3, 0.8);
         add_vine(plants, rng, top, outward, ax[0], length);
     }
+    // 從屋頂塌掉的破洞長出來的樹
+    let tp = local(hole_x, 0.0, rng.range(-wid * 0.2, wid * 0.2));
+    let tree_h = h + rng.range(9.0, 13.0);
+    overgrowth::build_tree(cfg, rng, solid, plants, tp.x, tp.z, tree_h);
 }
 
 // ---------------------------------------------------------------------
@@ -761,7 +781,8 @@ fn build_tower(cfg: &EnvironmentConfig, x: f32, z: f32, k: usize, solid: &mut So
 //  鐵絲網、刺鐵絲、輻射警告牌
 // ---------------------------------------------------------------------
 
-fn build_fence(cfg: &EnvironmentConfig, line: &FenceLine, rng: &mut Rng, solid: &mut Solid, fence: &mut Mesh, signs: &mut Mesh) {
+// FIXED(R07): 參數變成 7 個（多了 plants，藤蔓要畫在植物裡），剛好在 Clippy 的建議以內
+fn build_fence(cfg: &EnvironmentConfig, line: &FenceLine, rng: &mut Rng, solid: &mut Solid, fence: &mut Mesh, signs: &mut Mesh, plants: &mut Mesh) {
     let (ax, az) = line.a;
     let (bx, bz) = line.b;
     let dx = bx - ax;
@@ -781,6 +802,12 @@ fn build_fence(cfg: &EnvironmentConfig, line: &FenceLine, rng: &mut Rng, solid: 
     let rust = |rng: &mut Rng| Surface { color: scale3([0.24, 0.19, 0.15], rng.range(0.8, 1.15)), moss: 0.1, kind: KIND_METAL };
     let wire_s = Surface { color: [0.16, 0.14, 0.12], moss: 0.0, kind: KIND_METAL };
 
+    // 被藤蔓拉倒的一段：連續幾根柱子往同一邊倒
+    let n_fall = cfg.fence_collapse.min(posts.saturating_sub(1));
+    let fall_start = 1 + (rng.next_f32() * posts.saturating_sub(n_fall + 1).max(1) as f32) as usize;
+    let fallen = |i: usize| n_fall > 0 && i >= fall_start && i < fall_start + n_fall;
+    let fall_dir = if rng.next_f32() < 0.5 { 1.0 } else { -1.0 };
+
     // 柱子：有的歪了
     let mut tops: Vec<Vec3> = Vec::new();
     let mut bottoms: Vec<Vec3> = Vec::new();
@@ -790,7 +817,10 @@ fn build_fence(cfg: &EnvironmentConfig, line: &FenceLine, rng: &mut Rng, solid: 
         let z = az + dir.z * t;
         let gy = ground_height(cfg, x, z);
         let lean_amt = if rng.next_f32() < 0.25 { rng.range(0.15, 0.4) } else { rng.range(0.0, 0.05) };
-        let lean = (normal * rng.range(-1.0, 1.0) + dir * rng.range(-0.5, 0.5)).normalize_or(normal) * lean_amt;
+        let mut lean = (normal * rng.range(-1.0, 1.0) + dir * rng.range(-0.5, 0.5)).normalize_or(normal) * lean_amt;
+        if fallen(i) {
+            lean = (normal * fall_dir + dir * rng.range(-0.2, 0.2)).normalize_or(normal) * rng.range(1.1, 1.9);
+        }
         let bottom = Vec3::new(x, gy - 0.4, z);
         let top = bottom + (Vec3::new(0.0, 1.0, 0.0) + lean).normalize_or(Vec3::new(0.0, 1.0, 0.0)) * (height + 0.4);
         solid_beam(solid, bottom, top, 0.22, &rust(rng));
@@ -799,6 +829,12 @@ fn build_fence(cfg: &EnvironmentConfig, line: &FenceLine, rng: &mut Rng, solid: 
         add_beam(&mut solid.mesh, top, arm, 0.1, &rust(rng));
         tops.push(arm);
         bottoms.push(bottom);
+        // 藤蔓纏著柱子往上爬：倒下的那幾根纏得最多
+        if fallen(i) || rng.next_f32() < 0.3 {
+            for _ in 0..if fallen(i) { 3 } else { 1 } {
+                overgrowth::add_climber(plants, rng, bottom + Vec3::new(0.0, 0.3, 0.0), top, 0.16);
+            }
+        }
     }
 
     for i in 0..posts {
@@ -842,6 +878,16 @@ fn build_fence(cfg: &EnvironmentConfig, line: &FenceLine, rng: &mut Rng, solid: 
             });
             // 頂端的橫桿
             add_beam(&mut solid.mesh, t0, t1 - Vec3::new(0.0, sag * 0.3, 0.0), 0.1, &rust(rng));
+            // 倒下的那一段：網面上蓋滿從橫桿垂下的藤
+            if fallen(i) || fallen(i + 1) {
+                let face = thin * if thin.y >= 0.0 { 1.0 } else { -1.0 };   // 朝上的那一面
+                for _ in 0..5 {
+                    let f = rng.next_f32();
+                    let top = t0 + (t1 - t0) * f + face * 0.1;
+                    let length = rng.range(1.5, 4.0);
+                    add_vine(plants, rng, top, face, along, length);
+                }
+            }
         }
 
         // 三條刺鐵絲，加上一根根小刺
@@ -927,9 +973,12 @@ pub fn build(cfg: &EnvironmentConfig) -> Environment {
         build_tower(cfg, x, z, k, &mut structures);
     }
     for line in &cfg.fences {
-        build_fence(cfg, line, &mut rng, &mut structures, &mut fence, &mut signs);
+        build_fence(cfg, line, &mut rng, &mut structures, &mut fence, &mut signs, &mut plants);
     }
     build_debris(cfg, &mut rng, &mut structures);
+    for &(x, z, yaw) in &cfg.cars {
+        overgrowth::build_car(cfg, &mut rng, &mut structures, &mut plants, x, z, yaw);
+    }
 
     Environment { ground, structures, plants, fence, signs }
 }
