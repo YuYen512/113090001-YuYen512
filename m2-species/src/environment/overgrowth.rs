@@ -6,7 +6,7 @@
 //!   - 汽車沉進土裡、鏽穿、長滿苔蘚，草從車子旁邊冒出來
 
 use super::{add_obox, add_quad, add_vine, axes_yaw_tilt, ground_height, mix3, scale3, value_noise};
-use super::{BoxCollider, EnvironmentConfig, Solid, Surface, KIND_CONCRETE, KIND_METAL, KIND_PLANT};
+use super::{BoxCollider, EnvironmentConfig, Landmark, Shelter, Solid, Surface, KIND_CONCRETE, KIND_METAL, KIND_PLANT};
 use crate::hyphae::Rng;
 use crate::math::Vec3;
 use crate::mesh::Mesh;
@@ -191,6 +191,11 @@ pub(super) fn build_tree(cfg: &EnvironmentConfig, rng: &mut Rng, solid: &mut Sol
         add_tube(&mut solid.mesh, &[from, mid, end], &[r0, r0 * 0.6, r0 * 0.3], 5, &bark);
         let r_end = crown_r * rng.range(0.45, 0.7);
         add_blob(plants, rng, end, r_end, 0.12, leaf_c);
+        // 躲藏點：葉子團的正下方，被樹冠遮住（天亮時生物會飛來這裡倒掛著睡）
+        let hide = end - UP * (r_end * 0.75 + 1.3);
+        if hide.y > ground_height(cfg, hide.x, hide.z) + 2.5 {
+            solid.shelters.push(Shelter { at: hide, kind: 0 });
+        }
         if rng.next_f32() < 0.6 {
             let r_mid = crown_r * rng.range(0.3, 0.45);
             add_blob(plants, rng, mid + UP * 0.5, r_mid, 0.1, leaf_c);
@@ -200,6 +205,10 @@ pub(super) fn build_tree(cfg: &EnvironmentConfig, rng: &mut Rng, solid: &mut Sol
     add_blob(plants, rng, trunk_pt(1.0) + UP * 0.3, crown_r * 0.75, 0.14, leaf_c);
     // 爬上樹幹的藤
     add_climber(plants, rng, trunk_pt(0.0), trunk_pt(0.45), base_r * 1.05);
+    // 探索點：樹冠旁邊（生物自己探索時會飛來繞一繞）
+    let mid = trunk_pt(0.7);
+    let side = Vec3::new(lean.x, 0.0, lean.z).normalize_or(Vec3::new(1.0, 0.0, 0.0));
+    solid.marks.push(Landmark { at: mid + side * (crown_r * 1.6 + 1.5), look: mid, kind: 0 });
 }
 
 // ---------------------------------------------------------------------
@@ -247,6 +256,8 @@ pub(super) fn build_car(cfg: &EnvironmentConfig, rng: &mut Rng, solid: &mut Soli
             add_tube(&mut solid.mesh, &[c - ax[2] * 0.12, c + ax[2] * 0.12], &[0.36, 0.36], 12, &tire);
         }
     }
+    // 探索點：停在車頂上
+    solid.marks.push(Landmark { at: local(-0.3, roof_y + 1.05, 0.0), look: local(1.5, 0.0, 0.0), kind: 1 });
     // 碰撞：車身 + 車廂
     solid.boxes.push(BoxCollider { center: local(0.0, 0.0, 0.0), axes: ax, half: [2.3, belt, 0.9] });
     solid.boxes.push(BoxCollider { center: local(-0.3, (belt + roof_y) * 0.5, 0.0), axes: ax, half: [1.15, (roof_y - belt) * 0.5 + 0.05, 0.86] });

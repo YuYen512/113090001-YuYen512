@@ -115,11 +115,28 @@ pub struct CylCollider {
     pub shell: bool,
 }
 
-/// 會擋住生物的東西：畫出來的網格 + 簡化的碰撞形狀
+/// 生物自己探索時會去看看的地方。kind：0 樹、1 汽車、2 警告牌、3 廢墟
+pub struct Landmark {
+    /// 要飛到哪裡
+    pub at: Vec3,
+    /// 到了之後面向哪裡
+    pub look: Vec3,
+    pub kind: u8,
+}
+
+/// 天亮時可以躲起來睡覺的地方。kind：0 樹冠下、1 廢墟裡
+pub struct Shelter {
+    pub at: Vec3,
+    pub kind: u8,
+}
+
+/// 會擋住生物的東西：畫出來的網格 + 簡化的碰撞形狀（順便記下探索點和躲藏點）
 pub struct Solid {
     pub mesh: Mesh,
     pub boxes: Vec<BoxCollider>,
     pub cyls: Vec<CylCollider>,
+    pub marks: Vec<Landmark>,
+    pub shelters: Vec<Shelter>,
 }
 
 /// 畫一個方塊，並把它記成碰撞形狀
@@ -636,6 +653,12 @@ fn build_ruin(cfg: &EnvironmentConfig, r: &Ruin, rng: &mut Rng, solid: &mut Soli
 
     // 一棵樹從建築裡長出來，比殘牆還高（人類離開之後過了幾十年）
     let tp = local(rng.range(-hw * 0.35, hw * 0.35), 0.0, rng.range(-hd * 0.35, hd * 0.35));
+    // 躲藏點：建築裡面、牆邊（檢視器會再檢查上方有沒有樓板擋住、飛不飛得進去）
+    for (fx, fz) in [(-0.55f32, -0.5f32), (0.55, -0.5), (-0.55, 0.5), (0.55, 0.5), (0.0, 0.0)] {
+        solid.shelters.push(Shelter { at: local(fx * hw, cell * 1.7, fz * hd), kind: 1 });
+    }
+    // 探索點：在廢墟上方往下看
+    solid.marks.push(Landmark { at: local(hw * 0.3, rows as f32 * cell + 3.5, 0.0), look: local(0.0, 0.0, 0.0), kind: 3 });
     let tree_h = rows as f32 * cell + rng.range(4.0, 8.0);
     overgrowth::build_tree(cfg, rng, solid, plants, tp.x, tp.z, tree_h);
 }
@@ -959,7 +982,7 @@ fn build_debris(cfg: &EnvironmentConfig, rng: &mut Rng, solid: &mut Solid) {
 pub fn build(cfg: &EnvironmentConfig) -> Environment {
     let mut rng = Rng(cfg.seed.max(1));
     let ground = build_ground(cfg);
-    let mut structures = Solid { mesh: Mesh::new(), boxes: Vec::new(), cyls: Vec::new() };
+    let mut structures = Solid { mesh: Mesh::new(), boxes: Vec::new(), cyls: Vec::new(), marks: Vec::new(), shelters: Vec::new() };
     let mut plants = Mesh::new();
     let mut fence = Mesh::new();
     let mut signs = Mesh::new();
@@ -978,6 +1001,13 @@ pub fn build(cfg: &EnvironmentConfig) -> Environment {
     build_debris(cfg, &mut rng, &mut structures);
     for &(x, z, yaw) in &cfg.cars {
         overgrowth::build_car(cfg, &mut rng, &mut structures, &mut plants, x, z, yaw);
+    }
+
+    // 探索點：每塊警告牌前面（從警告牌的四個角算出中心和朝向）
+    for q in 0..signs.positions.len() / 4 {
+        let c = (signs.positions[q * 4] + signs.positions[q * 4 + 1] + signs.positions[q * 4 + 2] + signs.positions[q * 4 + 3]) * 0.25;
+        let n = signs.normals[q * 4];
+        structures.marks.push(Landmark { at: c + Vec3::new(n.x, 0.0, n.z).normalize_or(n) * 2.6, look: c, kind: 2 });
     }
 
     Environment { ground, structures, plants, fence, signs }
@@ -1019,13 +1049,15 @@ impl Environment {
             .collect();
         format!(
             "{{\"params\":{{\"ground_y\":{},\"flat_radius\":{},\"ground_size\":{},\"ground_grid\":{}}},\
-             \"colliders\":{{\"boxes\":[{}],\"cylinders\":[{}]}},\"parts\":[{}]}}",
+             \"colliders\":{{\"boxes\":[{}],\"cylinders\":[{}]}},\"landmarks\":[{}],\"shelters\":[{}],\"parts\":[{}]}}",
             crate::mesh::fmt_f(cfg.ground_y),
             crate::mesh::fmt_f(cfg.flat_radius),
             crate::mesh::fmt_f(cfg.ground_size),
             GROUND_GRID,
             boxes.join(","),
             cyls.join(","),
+            self.structures.marks.iter().map(|m| format!("[{},{},{}]", v(m.at), v(m.look), m.kind)).collect::<Vec<_>>().join(","),
+            self.structures.shelters.iter().map(|s| format!("[{},{}]", v(s.at), s.kind)).collect::<Vec<_>>().join(","),
             parts.join(",")
         )
     }

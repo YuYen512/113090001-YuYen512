@@ -41,7 +41,8 @@ window.__t = {
   },
   // 檢查時把時間停在半夜（不然跑到一半天亮，生物會自己去睡覺，干擾其他項目）
   reset() { keys.clear(); flight.speed = 0; flight.vy = 0; flight.turn = 0; stamina = 1; exhausted = false;
-            dayClock.frozen = true; dayClock.speed = 1; dayClock.phase = 0; daySleep = false; setMode('fly'); },
+            dayClock.frozen = true; dayClock.speed = 1; dayClock.phase = 0; daySleep = false;
+            brain.disabled = true; brain.state = 'manual'; brain.input = null; setMode('fly'); },
 };
 """
 
@@ -216,6 +217,47 @@ CHECKS = [
     __t.reset();
     return { ok: info.天亮後的模式 === 'sleep' && info.是因為天亮才睡 && info.天黑後的模式 === 'hover'
                && Math.abs(info.倍數 - 3) < 0.15, info };
+  }"""),
+
+  ("D14", "牠自己的行為：沒人操作會自己探索、你一按鍵就交回給你、天快亮會自己飛去躲起來睡、孢子落地長出真菌", """async () => {
+    const info = {};
+    const step = (n, extra) => {
+      for (let i = 0; i < n; i++) {
+        const dt = 1 / 60;
+        updateBrain(dt); updateFlight(i * dt, dt); updateStamina(dt);
+        if (extra) extra(dt);
+        const pose = animate(i * dt, dt); updateSpores(i * dt, dt, pose); updateFungi(dt);
+      }
+    };
+    // 1. 晚上、很久沒按鍵：自己去探索，到了會停下來看
+    __t.reset(); flight.pos = [0, 0, 0]; brain.disabled = false; dayClock.phase = 0.9; brain.idle = 999;
+    const seen = new Set();
+    for (let k = 0; k < 90 && !seen.has('linger'); k++) { step(60); seen.add(brain.state); }
+    info.有自己去探索 = seen.has('explore'); info.有停下來看 = seen.has('linger');
+    // 2. 你一按鍵就交回給你
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
+    info.按鍵後 = brain.state + (brain.input ? '（還在自己飛）' : '（交回給你）');
+    // 3. 凌晨 3 點：自己飛去躲藏點，天亮前就躲好睡著
+    __t.reset(); flight.pos = [0, 0, 0]; brain.disabled = false; brain.idle = 999;
+    dayClock.frozen = false; dayClock.phase = CONFIG.autonomy.seekHour / 24;
+    let n = 0;
+    while (mode !== 'sleep' && n++ < 60 * 60) step(1, (dt) => updateDayNight(dt));
+    const g = brain.goal;
+    info.躲好的時間 = (dayClock.phase * 24).toFixed(2) + ' 點'; info.躲在哪 = brain.label; info.狀態 = brain.state;
+    info.離躲藏點 = g ? +Math.hypot(g[0] - flight.pos[0], g[1] - flight.pos[1], g[2] - flight.pos[2]).toFixed(2) : null;
+    // 4. 真菌：落在同一個地方會讓那一片長大，落在別的地方會長出新的一片
+    __t.reset(); fungi.length = 0;
+    seedFungus([5, -3, 5], [0, 1, 0]); const s0 = fungi[0].target;
+    seedFungus([5.2, -3, 5.1], [0, 1, 0]);
+    info.同一處落兩顆 = fungi.length + ' 片，長大了 ' + (fungi[0].target - s0).toFixed(2);
+    seedFungus([12, -3, 5], [0, 1, 0]);
+    info.別處再落一顆 = fungi.length + ' 片';
+    const ok = info.有自己去探索 && info.有停下來看 && info.按鍵後 === 'manual（交回給你）'
+      && info.狀態 === 'hidden' && parseFloat(info.躲好的時間) < 6 && info.離躲藏點 < 1.2
+      && fungi.length === 2 && Math.abs(fungi[0].target - s0 - CONFIG.fungus.growPerSpore) < 1e-6;
+    fungi.length = 0; __t.reset();
+    return { ok, info };
   }"""),
 
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {

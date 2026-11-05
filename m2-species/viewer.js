@@ -133,13 +133,37 @@ const CONFIG = {
     wakeAt: 0.5,               // 累倒睡著後，體力恢復到多少才叫得醒
   },
 
+  // 自己的行為：沒人操作時自己探索、天快亮時自己找地方躲起來
+  autonomy: {
+    enabled: true,
+    idleDelay: 10,             // 幾秒沒按鍵，牠就開始自己探索
+    linger: [6, 10],           // 到了一個地方，停下來看幾秒（同時降低高度撒孢子）
+    sowBoost: 8,               // 停下來時撒孢子的量是平常的幾倍
+    sowHeight: 2.0,            // 停下來撒孢子時，降到離下面多高
+    seekHour: 3,               // 幾點開始找地方躲（6 點天亮；正常速度下大約有 45 秒可以飛過去）
+    seekTimeout: 45,           // 找躲藏點最多花幾秒，超過就原地睡
+    giveUpAfter: 25,           // 一個探索目標飛了幾秒還到不了，就換一個
+  },
+  // 孢子落地長出的真菌：人類的廢墟慢慢被發光的菌斑覆蓋
+  fungus: {
+    chance: 0.5,               // 每顆落地的孢子長出真菌的機率
+    max: 600,                  // 最多幾片
+    mergeDist: 0.7,            // 落在已經有真菌的地方附近，就讓那一片長大
+    startSize: [0.3, 0.5],     // 剛長出來的大小（半徑）
+    growPerSpore: 0.1,         // 每多一顆孢子，那一片長大多少
+    maxSize: 1.8,
+    growSpeed: 0.08,           // 長大的速度
+    glow: 0.9,                 // 夜裡的亮度
+    dayGlow: 0.25,             // 白天看起來的亮度
+  },
+
   // 孢子：生物飛行時幫真菌散播
   spores: {
     max: 500,
     hoverRate: 0.5,            // 漂浮時每秒平均掉幾顆
     flyRate: 4.0,              // 飛行時每秒平均掉幾顆（脈動時更多）
     life: [8, 14],             // 存在幾秒
-    gravity: 0.12,
+    gravity: 0.24,             // 落下的速度（太慢的話孢子還沒落地就熄了，長不出真菌）
     drag: 0.7,                 // 空氣阻力：越大掉得越慢
     size: 0.045,
   },
@@ -504,6 +528,52 @@ void main() {
   o = vec4(vec3(0.5, 0.9, 0.85) * g, 1.0);
 }`;
 
+// 真菌：貼在表面上的一片發光菌斑（菌絲網 + 幾顆小菇），會呼吸般明滅；生物靠近時亮起來
+const FUNGUS_VS = `#version 300 es
+layout(location=0) in vec2 a_corner;
+layout(location=1) in vec3 a_pos;
+layout(location=2) in vec3 a_n;
+layout(location=3) in vec2 a_info;     // 大小、種子
+uniform mat4 u_view, u_proj;
+out vec2 v_c; out float v_seed; out vec3 v_w;
+void main() {
+  vec3 n = normalize(a_n);
+  vec3 t = normalize(cross(n, abs(n.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+  vec3 b = cross(n, t);
+  float r = a_info.x * 1.3;
+  vec3 w = a_pos + n * 0.08 + (t * a_corner.x + b * a_corner.y) * r;
+  v_c = a_corner; v_seed = a_info.y; v_w = w;
+  gl_Position = u_proj * u_view * vec4(w, 1.0);
+}`;
+const FUNGUS_FS = `#version 300 es
+precision highp float;
+in vec2 v_c; in float v_seed; in vec3 v_w; out vec4 o;
+uniform vec3 u_color, u_corePos; uniform float u_time, u_glow, u_coreI;
+// FIXED(D13): 原本用 sin 做雜湊，有些顯示卡算大數字的 sin 不精確，真菌上出現一格一格的雜點；改用不用 sin 的雜湊
+float h21(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y);
+}
+void main() {
+  float r = length(v_c);
+  if (r > 1.0) discard;
+  vec2 q = v_c * 3.0 + v_seed * 17.0;
+  float edge = smoothstep(1.0, 0.25, r + (vnoise(q * 0.8) - 0.5) * 0.45);          // 邊緣不規則
+  float net = 1.0 - smoothstep(0.0, 0.07, abs(vnoise(q) - 0.5));                     // 菌絲網
+  net += 0.6 * (1.0 - smoothstep(0.0, 0.05, abs(vnoise(q * 2.3 + 5.0) - 0.5)));
+  float caps = 0.0;                                                                    // 幾顆小菇的發光頭
+  for (int i = 0; i < 6; i++) {
+    float fi = float(i);
+    vec2 c = (vec2(h21(vec2(v_seed, fi)), h21(vec2(fi, v_seed))) - 0.5) * 1.3;
+    caps += exp(-dot(v_c - c, v_c - c) * 220.0) * (0.5 + h21(vec2(fi * 3.1, v_seed)));
+  }
+  float breathe = 0.7 + 0.3 * sin(u_time * 0.8 + v_seed * 40.0);
+  float near = exp(-dot(v_w - u_corePos, v_w - u_corePos) / 18.0) * (0.6 + u_coreI);  // 生物靠近時亮起來
+  float g = (net * 0.35 * edge + caps * 1.4 + edge * 0.08) * breathe * u_glow * (1.0 + 1.5 * near);
+  o = vec4(u_color * g, 1.0);
+}`;
+
 // 環境：地面、廢墟、工廠、冷卻塔、草、藤、鐵絲網、警告牌
 const ENV_VS = `#version 300 es
 layout(location=0) in vec3 a_pos;
@@ -717,6 +787,7 @@ const progBg = compile(BG_VS, BG_FS);
 const progMote = compile(MOTE_VS, MOTE_FS);
 const progFloor = compile(FLOOR_VS, FLOOR_FS);
 const progEnv = compile(ENV_VS, ENV_FS);
+const progFungus = compile(FUNGUS_VS, FUNGUS_FS);
 const progSpore = compile(SPORE_VS, SPORE_FS);
 
 function uploadMesh(mesh) {
@@ -821,6 +892,7 @@ const statusEl = document.getElementById('status');
 const staminaBar = document.getElementById('staminaBar');
 const staminaText = document.getElementById('staminaText');
 const clockEl = document.getElementById('clock');
+const fungusEl = document.getElementById('fungusCount');
 const modeButtons = document.querySelectorAll('.seg button[data-mode]');
 function setMode(m) {
   mode = m;
@@ -841,7 +913,7 @@ function requestMode(m) {
   if (m !== 'sleep') { exhausted = false; daySleep = false; }    // 你叫醒牠（白天也可以，只是很耗體力）
   setMode(m);
 }
-modeButtons.forEach((b) => b.addEventListener('click', () => { requestMode(b.dataset.mode); b.blur(); }));
+modeButtons.forEach((b) => b.addEventListener('click', () => { brainHandOver(); requestMode(b.dataset.mode); b.blur(); }));
 
 // 面板與「操作」資料夾可以收合
 function makeCollapsible(container, toggle) {
@@ -860,6 +932,7 @@ makeCollapsible(keysFolder, keysFolder.querySelector('.folder-title'));
 const keys = new Set();
 const CONTROL_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'ShiftLeft', 'ShiftRight'];
 window.addEventListener('keydown', (e) => {
+  brainHandOver();                               // 你一按鍵，就換回你來操控
   // FIXED(D03): 長按 M 時，按鍵自動重複（e.repeat）不再切換飛行／漂浮
   if (e.code === 'KeyM') { if (!e.repeat) requestMode(mode === 'fly' ? 'hover' : 'fly'); return; }
   // FIXED(D02): 長按 Z 時，按鍵自動重複（e.repeat）不再切換睡覺／醒來
@@ -994,13 +1067,18 @@ const ease = (rate, dt) => 1 - Math.exp(-rate * dt);
 
 function updateFlight(t, dt) {
   const awake = sleepBlend < 0.05;              // 睡著（或正在入睡／醒來）時不能移動
-  const fwdRaw = (held('KeyW', 'ArrowUp') ? 1 : 0) - (held('KeyS', 'ArrowDown') ? 1 : 0);
-  const fwd = awake ? fwdRaw : 0;
-  const turnIn = awake ? (held('KeyA', 'ArrowLeft') ? 1 : 0) - (held('KeyD', 'ArrowRight') ? 1 : 0) : 0;
-  const climb = awake ? (held('Space', 'KeyE') ? 1 : 0) - (held('ShiftLeft', 'ShiftRight', 'KeyQ') ? 1 : 0) : 0;
+  // 操控來源：你按的鍵；沒人操作時由 brain（牠自己的決定）給一樣格式的指令
+  const src = brain.input || {
+    fwd: (held('KeyW', 'ArrowUp') ? 1 : 0) - (held('KeyS', 'ArrowDown') ? 1 : 0),
+    turn: (held('KeyA', 'ArrowLeft') ? 1 : 0) - (held('KeyD', 'ArrowRight') ? 1 : 0),
+    climb: (held('Space', 'KeyE') ? 1 : 0) - (held('ShiftLeft', 'ShiftRight', 'KeyQ') ? 1 : 0),
+  };
+  const fwd = awake ? src.fwd : 0;
+  const turnIn = awake ? src.turn : 0;
+  const climb = awake ? src.climb : 0;
 
   const vigor = staminaVigor();                // 累的時候飛得比較慢
-  const targetSpeed = (fwd > 0 ? FL.maxSpeed : fwd < 0 ? -0.35 * FL.maxSpeed : 0) * lerp(CONFIG.stamina.slowest, 1, vigor);
+  const targetSpeed = (fwd > 0 ? FL.maxSpeed * fwd : fwd < 0 ? 0.35 * FL.maxSpeed * fwd : 0) * lerp(CONFIG.stamina.slowest, 1, vigor);
   flight.speed += (targetSpeed - flight.speed) * ease(fwd ? FL.accel : FL.accel * 1.6, dt);
   flight.turn += (turnIn * FL.turnRate - flight.turn) * ease(4, dt);
   flight.heading += flight.turn * dt;
@@ -1024,6 +1102,175 @@ function updateFlight(t, dt) {
 }
 
 // ---------------------------------------------------------------------
+//  牠自己的行為（brain）：沒人操作時自己探索；天快亮時自己飛去躲起來睡
+//  做法：brain 決定「要去哪裡」，再換成和按鍵一樣的指令（前進、轉向、上升）交給飛行
+// ---------------------------------------------------------------------
+const AU = CONFIG.autonomy;
+const LANDMARK_NAMES = ['大樹', '汽車', '警告牌', '廢墟', '真菌'];
+const LANDMARKS = ENV && ENV.landmarks ? ENV.landmarks.map((m) => ({ at: [m[0], m[1], m[2]], look: [m[3], m[4], m[5]], kind: m[6] })) : [];
+// 躲藏點：只留下「生物真的進得去」的（不卡在牆或樓板裡、正上方沒有東西擋住，從上面可以直接降落進去）
+// （第一次用到時才檢查：碰撞和射線的程式在檔案後面才準備好）
+let shelterCache = null;
+function shelters() {
+  if (shelterCache) return shelterCache;
+  shelterCache = (ENV && ENV.shelters ? ENV.shelters : []).map((s) => ({ at: [s[0], s[1], s[2]], kind: s[3] })).filter((s) => {
+    const p = s.at.slice();
+    resolveCollisions(p, FL.collisionRadius + 0.15);
+    if (Math.hypot(p[0] - s.at[0], p[1] - s.at[1], p[2] - s.at[2]) > 0.05) return false;
+    const up = FL.ceilingY - 1 - s.at[1];
+    return up > 0 && rayClearance(s.at, [0, 1, 0], up) >= up - 0.01;
+  });
+  return shelterCache;
+}
+
+const brain = {
+  state: 'manual',        // manual 你在操控、explore 飛去探索、linger 停下來看、rest 累了休息、seek 找地方躲、hidden 躲好了
+  input: null,            // 給飛行的指令（null = 用鍵盤）
+  idle: 0,                // 多久沒按鍵了（秒）
+  goal: null, look: null, label: '',
+  timer: 0,               // 目前這件事做了多久
+  best: Infinity, lastProgress: 0,
+  disabled: false,        // 自動檢查時關掉
+};
+function brainHandOver() {
+  brain.idle = 0;
+  if (brain.state !== 'manual' && brain.state !== 'hidden') { brain.state = 'manual'; brain.input = null; }
+}
+const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const clamp1 = (x) => Math.max(-1, Math.min(1, x));
+
+// 朝目標飛：路上有東西擋住就先往上爬，越過去再前進；快到了就減速、對準高度
+function steerTo(goal) {
+  const p = flight.pos;
+  const d = sub(goal, p);
+  const hd = Math.hypot(d[0], d[2]);
+  const dist = Math.hypot(d[0], d[1], d[2]);
+  const diff = wrapAngle(Math.atan2(d[0], d[2]) - flight.heading);
+  let fwd = hd > 0.6 ? Math.max(0, 1 - Math.abs(diff) / 1.2) * Math.min(1, hd / 4) : 0;
+  let climb = clamp1(d[1] / 1.5);
+  if (dist > 1.5) {
+    const clear = rayClearance(p, [d[0] / dist, d[1] / dist, d[2] / dist], dist) >= dist - 0.3;
+    if (!clear) {
+      const look = Math.min(hd, 8);
+      const ahead = hd > 0.5 && rayClearance(p, [d[0] / hd, 0, d[2] / hd], look) < look - 0.3;
+      if (ahead) { climb = 1; fwd *= 0.25; }              // 正前方有東西：先爬高
+      else climb = Math.max(climb, 0);                     // 前面空了，但直直飛過去會撞到：保持高度往前
+    }
+  }
+  // 牠的翅膀在牆邊會收起來，太靠近目標的時候放慢
+  return { input: { fwd, turn: clamp1(diff * 2), climb }, dist, hd };
+}
+
+function nearestShelter() {
+  let best = null, bd = Infinity;
+  for (const s of shelters()) {
+    const d = Math.hypot(s.at[0] - flight.pos[0], s.at[2] - flight.pos[2]) + Math.abs(s.at[1] - flight.pos[1]) * 1.5;
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
+}
+
+function pickLandmark() {
+  // 有自己種的真菌時，偶爾回去看看
+  if (fungi.length && Math.random() < 0.25) {
+    const f = fungi[Math.floor(Math.random() * fungi.length)];
+    return { at: [f.p[0] + f.n[0] * 2, f.p[1] + f.n[1] * 2 + 0.5, f.p[2] + f.n[2] * 2], look: f.p, kind: 4 };
+  }
+  // 越近的地方越容易被選中，但不要一直回到剛剛那個
+  const options = LANDMARKS.filter((m) => m !== brain.lastMark).map((m) => {
+    const d = Math.hypot(m.at[0] - flight.pos[0], m.at[2] - flight.pos[2]);
+    return { m, w: Math.exp(-d / 25) };
+  });
+  let r = Math.random() * options.reduce((a, o) => a + o.w, 0);
+  for (const o of options) { if ((r -= o.w) <= 0) return o.m; }
+  return options.length ? options[0].m : null;
+}
+
+function startGoing(state, goal, look, label) {
+  brain.state = state; brain.goal = goal; brain.look = look; brain.label = label;
+  brain.timer = 0; brain.best = Infinity; brain.lastProgress = 0;
+}
+
+function updateBrain(dt) {
+  brain.idle += dt;
+  if (brain.disabled || !AU.enabled) { brain.input = null; return; }
+  if (mode === 'sleep') { brain.input = null; if (brain.state !== 'hidden') brain.state = 'manual'; return; }
+  if (brain.state === 'hidden') brain.state = 'manual';     // 醒來了
+  brain.timer += dt;
+  const hour = dayClock.phase * 24;
+  const userIdle = brain.idle > 3;
+
+  // 1. 天快亮了：自己找地方躲（你在操控時不搶，但你一停手牠就去）
+  const preDawn = (hour >= AU.seekHour && hour < 6) || (isDaytime() && brain.state === 'seek');
+  if (preDawn && userIdle && brain.state !== 'seek') {
+    const s = nearestShelter();
+    if (s) startGoing('seek', s.at, null, s.kind === 0 ? '飛去樹冠下躲起來' : '飛進廢墟裡躲起來');
+  }
+  if (brain.state === 'seek') {
+    if (mode !== 'fly') setMode('fly');
+    const st = steerTo(brain.goal);
+    brain.input = st.input;
+    if (st.dist < 0.9 || brain.timer > AU.seekTimeout) {     // 到了（或找太久了）：就地睡
+      brain.state = 'hidden'; brain.input = null;
+      daySleep = true; keys.clear(); setMode('sleep');
+    }
+    return;
+  }
+
+  // 2. 太久沒人操作（而且是晚上）：自己探索
+  if (brain.state === 'manual') {
+    if (brain.idle > AU.idleDelay && !isDaytime() && LANDMARKS.length) {
+      const m = pickLandmark();
+      if (m) { brain.lastMark = m; startGoing('explore', m.at, m.look, LANDMARK_NAMES[m.kind]); }
+    } else { brain.input = null; return; }
+  }
+  if (isDaytime()) { brain.state = 'manual'; brain.input = null; return; }   // 白天被你叫醒時不自己亂飛
+
+  if (brain.state !== 'rest' && stamina < CONFIG.stamina.tiredBelow) {      // 累了：停下來漂浮休息
+    brain.state = 'rest'; brain.timer = 0;
+  }
+  if (brain.state === 'rest') {
+    if (mode !== 'hover') setMode('hover');
+    brain.input = { fwd: 0, turn: 0, climb: 0 };
+    if (stamina > 0.6) brain.state = 'manual';               // 休息夠了，再去探索
+    return;
+  }
+  if (brain.state === 'explore') {
+    if (mode !== 'fly') setMode('fly');
+    const st = steerTo(brain.goal);
+    brain.input = st.input;
+    if (st.dist < brain.best - 0.5) { brain.best = st.dist; brain.lastProgress = brain.timer; }
+    if (st.dist < 1.2) {                                     // 到了：停下來看一看
+      brain.state = 'linger'; brain.timer = 0;
+      brain.lingerFor = lerp(AU.linger[0], AU.linger[1], Math.random());
+    } else if (brain.timer - brain.lastProgress > 8 || brain.timer > AU.giveUpAfter) {
+      brain.state = 'manual'; brain.idle = AU.idleDelay;     // 到不了：換一個地方
+    }
+    return;
+  }
+  if (brain.state === 'linger') {
+    if (mode !== 'hover') setMode('hover');
+    const d = sub(brain.look, flight.pos);
+    const diff = wrapAngle(Math.atan2(d[0], d[2]) - flight.heading);
+    // 停下來時慢慢降到離下面的東西（地面、車頂、牆頂）約 2 公尺，孢子才落得到，在那裡長出真菌
+    const below = Math.min(rayClearance(flight.pos, [0, -1, 0], 30), flight.pos[1] - groundHeightAt(flight.pos[0], flight.pos[2]));
+    const sink = Math.max(0, below - AU.sowHeight);
+    brain.input = { fwd: 0, turn: clamp1(diff * 1.5) * 0.6, climb: -clamp1(sink / 1.5) * 0.6 };
+    if (brain.timer > brain.lingerFor) { brain.state = 'manual'; brain.idle = AU.idleDelay; }
+  }
+}
+
+function brainStatus() {
+  switch (brain.state) {
+    case 'seek': return isDaytime() ? '天亮了！' + brain.label : '天快亮了，' + brain.label;
+    case 'explore': return '自己探索中 · 去看看' + brain.label;
+    case 'linger': return '正在看' + brain.label + '…';
+    case 'rest': return '自己探索中 · 累了，休息一下';
+    default: return null;
+  }
+}
+
+// ---------------------------------------------------------------------
 //  晝夜：太陽東升西落，夜裡月亮和星星；牠白天睡覺、晚上活動
 // ---------------------------------------------------------------------
 const DN = CONFIG.dayNight;
@@ -1037,9 +1284,9 @@ function updateDayNight(dt) {
   const wasDay = isDaytime();
   if (!dayClock.frozen) dayClock.phase = (dayClock.phase + dt * dayClock.speed / DN.dayLength) % 1;
   const nowDay = isDaytime();
-  if (!wasDay && nowDay) {                 // 天亮了：回去睡覺
+  if (!wasDay && nowDay) {                 // 天亮了：回去睡覺（正在飛去躲藏點的話，讓牠飛到再睡）
     daySleep = true;
-    if (mode !== 'sleep') { keys.clear(); setMode('sleep'); }
+    if (mode !== 'sleep' && brain.state !== 'seek') { keys.clear(); setMode('sleep'); }
   }
   if (wasDay && !nowDay && daySleep) {     // 天黑了：醒來活動（累倒時還是要睡夠才會醒）
     daySleep = false;
@@ -1318,13 +1565,15 @@ function pushSporeOut(p) {
     }
     const sgn = Math.sign(local[best]) || 1;
     for (let a = 0; a < 3; a++) p[a] += b.ax[best][a] * sgn * (bestPen + 0.005);
-    return true;
+    return b.ax[best].map((x) => x * sgn);                      // 回傳落在哪一面（朝外的方向），真菌會貼著這一面長
   }
-  return false;
+  return null;
 }
 
 function updateSpores(t, dt, pose) {
-  const rate = lerp(SP.hoverRate, SP.flyRate, pose.fly) * (0.3 + 1.4 * pose.wave) * (1 - pose.sleep) * (1 - 0.6 * (pose.tired || 0));
+  const rate = lerp(SP.hoverRate, SP.flyRate, pose.fly) * (0.3 + 1.4 * pose.wave) * (1 - pose.sleep) * (1 - 0.6 * (pose.tired || 0))
+    // 自己探索時停下來看一個地方，會刻意在那裡撒孢子（幫真菌「播種」）
+    * (brain.state === 'linger' ? CONFIG.autonomy.sowBoost : 1);
   let toSpawn = rate * dt;
   const rootM = pose.world[0];
   const back = [-Math.sin(flight.heading), 0, -Math.cos(flight.heading)];
@@ -1363,13 +1612,14 @@ function updateSpores(t, dt, pose) {
     for (let a = 0; a < 3; a++) { sp.v[a] *= damp; sp.p[a] += sp.v[a] * dt; }
     // FIXED(D07): 除了地面，也會停在屋頂、樓板、牆面上（用分格表只檢查附近的方塊）
     const g = groundHeightAt(sp.p[0], sp.p[2]);
-    let land = sp.p[1] <= g;
+    let land = sp.p[1] <= g ? [0, 1, 0] : null;
     if (land) sp.p[1] = g;
     else land = pushSporeOut(sp.p);
     if (land) {                                                   // 落地後停住、慢慢熄滅
       sp.v = [0, 0, 0];
       sp.landed = true;
       sp.life = Math.min(sp.life, sp.age + 2.5);
+      if (Math.random() < CONFIG.fungus.chance) seedFungus(sp.p, land);   // 有些會長成真菌
     }
   }
 
@@ -1381,6 +1631,54 @@ function updateSpores(t, dt, pose) {
   }
   gl.bindBuffer(gl.ARRAY_BUFFER, sporeBuf);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, sporeCpu, 0, spores.length * 5);
+}
+
+// ---------------------------------------------------------------------
+//  真菌：孢子落地的地方慢慢長出發光的菌斑；同一個地方落越多孢子，那一片就長越大
+// ---------------------------------------------------------------------
+const FG = CONFIG.fungus;
+const fungi = [];
+function seedFungus(p, n) {
+  for (const f of fungi) {
+    const d = Math.hypot(f.p[0] - p[0], f.p[1] - p[1], f.p[2] - p[2]);
+    if (d < FG.mergeDist && dot(f.n, n) > 0.8) { f.target = Math.min(FG.maxSize, f.target + FG.growPerSpore); return; }
+  }
+  if (fungi.length >= FG.max) return;
+  fungi.push({ p: p.slice(), n: n.slice(), size: 0, target: lerp(FG.startSize[0], FG.startSize[1], Math.random()), seed: Math.random() });
+}
+const FUNGUS_FLOATS = 8;
+const fungusCpu = new Float32Array(FG.max * FUNGUS_FLOATS);
+const fungusBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, fungusBuf);
+gl.bufferData(gl.ARRAY_BUFFER, fungusCpu.byteLength, gl.DYNAMIC_DRAW);
+const fungusVao = gl.createVertexArray();
+gl.bindVertexArray(fungusVao);
+{
+  const corner = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, corner);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, fungusBuf);
+  const stride = FUNGUS_FLOATS * 4;
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 0);    // 位置
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, stride, 12);   // 朝向
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 24);   // 大小、種子
+  for (const a of [1, 2, 3]) gl.vertexAttribDivisor(a, 1);
+}
+gl.bindVertexArray(null);
+
+function updateFungi(dt) {
+  for (let k = 0; k < fungi.length; k++) {
+    const f = fungi[k];
+    f.size += (f.target - f.size) * (1 - Math.exp(-FG.growSpeed * dt));
+    const o = k * FUNGUS_FLOATS;
+    fungusCpu[o] = f.p[0]; fungusCpu[o + 1] = f.p[1]; fungusCpu[o + 2] = f.p[2];
+    fungusCpu[o + 3] = f.n[0]; fungusCpu[o + 4] = f.n[1]; fungusCpu[o + 5] = f.n[2];
+    fungusCpu[o + 6] = f.size; fungusCpu[o + 7] = f.seed;
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, fungusBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, fungusCpu, 0, fungi.length * FUNGUS_FLOATS);
 }
 
 // ---------------------------------------------------------------------
@@ -1500,9 +1798,11 @@ function frame(now) {
   resize();
   gl.viewport(0, 0, canvas.width, canvas.height);
 
+  updateBrain(dt);
   updateFlight(t, dt);
   updateStamina(dt);
   updateDayNight(dt);
+  updateFungi(dt);
   const sky = skyState(dayClock.phase);
   const eye = updateCamera(t, dt);
   const aspect = canvas.width / canvas.height;
@@ -1515,11 +1815,15 @@ function frame(now) {
   let statusText = mode === 'sleep' ? (pose.sleep > 0.95 ? (exhausted ? '累倒了，睡覺恢復中' : '睡覺中') : (exhausted ? '累倒了…' : '準備入睡…'))
     : pose.sleep > 0.05 ? '醒來中…'
     : flight.moving ? '飛行中 · 移動' : (pose.fly > 0.5 ? '飛行中' : '漂浮中');
-  if (mode === 'sleep' && daySleep && pose.sleep > 0.95 && !exhausted) statusText = '白天 · 睡覺中（天黑會醒來）';
+  if (mode === 'sleep' && daySleep && pose.sleep > 0.95 && !exhausted) statusText = brain.state === 'hidden' ? '白天 · 躲起來睡覺（天黑會醒來）' : '白天 · 睡覺中（天黑會醒來）';
+  const bs = brainStatus();
+  if (bs && mode !== 'sleep') statusText = bs;
   if (mode !== 'sleep' && isDaytime()) statusText += ' · 白天很耗體力';
   if (mode !== 'sleep' && stamina < CONFIG.stamina.tiredBelow) statusText += ' · 累了';
   const ct = clockText();
   if (clockEl.textContent !== ct) clockEl.textContent = ct;
+  const fc = fungi.length + ' 片';
+  if (fungusEl.textContent !== fc) fungusEl.textContent = fc;
   if (now / 1000 - wakeBlockedAt < 1.5) statusText = '太累了，叫不醒…';
   if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
   const pct = Math.round(stamina * 100);
@@ -1590,6 +1894,29 @@ function frame(now) {
       gl.bindVertexArray(part.vao);
       gl.drawElements(gl.TRIANGLES, part.count, gl.UNSIGNED_INT, 0);
     }
+  }
+
+  // 真菌（加法混合；貼在表面上，會被前面的東西擋住）
+  if (fungi.length) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.depthMask(false);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(progFungus.program);
+    const fu = progFungus.u;
+    gl.uniformMatrix4fv(fu.u_view, false, view);
+    gl.uniformMatrix4fv(fu.u_proj, false, proj);
+    gl.uniform3fv(fu.u_color, colors.core);
+    gl.uniform3fv(fu.u_corePos, corePos);
+    gl.uniform1f(fu.u_coreI, pose.coreI);
+    gl.uniform1f(fu.u_time, t);
+    gl.uniform1f(fu.u_glow, lerp(FG.glow, FG.dayGlow, sky.day));
+    gl.bindVertexArray(fungusVao);
+    // 貼在表面上的薄片容易和地面搶「誰在前面」而出現雜點，讓它的深度往鏡頭拉近一點
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-4, -16);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, fungi.length);
+    gl.disable(gl.POLYGON_OFFSET_FILL);
   }
 
   // 微光粒子（加法混合；有環境時會被建築擋住）
