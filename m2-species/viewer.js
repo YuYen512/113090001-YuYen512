@@ -85,7 +85,7 @@ const CONFIG = {
 
   // 晝夜：人類不在了，夜裡沒有一盞燈，滿天星星；地上唯一的光是牠和真菌
   dayNight: {
-    dayLength: 360,            // 一整天（白天 + 夜晚）是幾秒
+    dayLength: 1200,           // 一整天（白天 + 夜晚）是幾秒：20 分鐘，夜晚大約 10 分鐘
     startHour: 21.5,           // 一打開是幾點（21.5 = 晚上 9 點半）
     fastForward: 30,           // 按 T 快轉的倍數
     dayDrainMul: 3,            // 白天硬要醒著飛，體力消耗是晚上的幾倍
@@ -123,8 +123,8 @@ const CONFIG = {
 
   // 體力：飛行會累，睡覺會恢復
   stamina: {
-    flyDrain: 1 / 60,          // 在空中移動時每秒消耗多少（1 = 全部）：一直飛大約 60 秒會累倒
-    flyIdleDrain: 1 / 240,     // 飛行模式停在原地拍翅膀，消耗得比較慢
+    flyDrain: 1 / 180,         // 在空中移動時每秒消耗多少（1 = 全部）：一直飛大約 3 分鐘會累倒
+    flyIdleDrain: 1 / 600,     // 飛行模式停在原地拍翅膀，消耗得比較慢（大約 10 分鐘）
     hoverRecover: 1 / 180,     // 漂浮時慢慢恢復
     sleepRecover: 1 / 25,      // 睡著時恢復得最快：從累倒到睡飽大約 25 秒
     tiredBelow: 0.35,          // 體力低於多少開始看得出累（飛得慢、拍翅吃力、光變暗、慢慢往下掉）
@@ -151,8 +151,10 @@ const CONFIG = {
     youngStart: 0.22,          // 剛孵出來的幼體是成體的幾倍大
     youngScale: 0.42,          // 長大後（還是幼體）是成體的幾倍大
     growTime: 90,              // 幾秒長到 youngScale
+    youngSpeed: 2.2,           // 幼體飛多快（成體是 3.2）
+    youngLinger: [3, 8],       // 幼體到了一個地方，停下來看幾秒
+    youngRoam: 12,             // 幼體通常在附近幾公尺內找下一個想去的地方
     youngGlow: 0.55,           // 幼體的菌絲和核心比成體暗多少（菌絲還很微弱）
-    followDist: 2.4,           // 幼體跟在成體後面多遠
   },
 
   // 自己的行為：沒人操作時自己探索、天快亮時自己找地方躲起來
@@ -162,7 +164,7 @@ const CONFIG = {
     linger: [6, 10],           // 到了一個地方，停下來看幾秒（同時降低高度撒孢子）
     sowBoost: 8,               // 停下來時撒孢子的量是平常的幾倍
     sowHeight: 2.0,            // 停下來撒孢子時，降到離下面多高
-    seekHour: 3,               // 幾點開始找地方躲（6 點天亮；正常速度下大約有 45 秒可以飛過去）
+    seekHour: 4.5,             // 幾點開始找地方躲（6 點天亮；一天 20 分鐘時，大約有 75 秒可以飛過去）
     seekTimeout: 45,           // 找躲藏點最多花幾秒，超過就原地睡
     giveUpAfter: 25,           // 一個探索目標飛了幾秒還到不了，就換一個（遠的地方會依距離多給一點時間）
   },
@@ -1352,42 +1354,76 @@ function updateBreeding(dt) {
     e.age += dt;
     if (e.age >= e.hatchAt) {                                     // 孵化
       eggs.splice(i, 1);
-      young.push({ pos: [e.p[0] + e.n[0] * 0.5, e.p[1] + 0.2, e.p[2] + e.n[2] * 0.5], vel: [e.n[0] * 0.6, 0.4, e.n[2] * 0.6],
-                   heading: Math.atan2(e.n[0], e.n[2]), age: 0, scale: BR.youngStart, born: e.p.slice() });
+      young.push({ pos: [e.p[0] + e.n[0] * 0.5, e.p[1] + 0.2, e.p[2] + e.n[2] * 0.5],
+                   heading: Math.atan2(e.n[0], e.n[2]), age: 0, scale: BR.youngStart, born: e.p.slice(), goal: null });
       breedMsg = { text: '卵孵化了！', until: breedClock + 3 };
     }
   }
   updateYoung(dt);
 }
 
-// 幼體：跟在成體後面左右排開飛；剛孵出來的前幾秒先在卵旁邊飄一下
+// 幼體：自己決定要去哪裡（不跟著成體）。剛孵出來的前幾秒先在卵旁邊飄一下，
+// 之後就自己探索：通常在附近找一個地方飛過去，偶爾去看大樹、汽車、廢墟這些地方；到了停下來看一看，再換下一個。
+// 怎麼飛過去和成體自己探索時一樣（steerTo：路上有東西擋住就先爬高；route：進出地底經過洞口）。
+function youngPickGoal(y) {
+  if (Math.random() < 0.3 && LANDMARKS.length) {
+    const options = LANDMARKS.map((m) => ({ m, w: Math.exp(-Math.hypot(m.at[0] - y.pos[0], m.at[2] - y.pos[2]) / 30) }));
+    let r = Math.random() * options.reduce((a, o) => a + o.w, 0);
+    for (const o of options) if ((r -= o.w) <= 0) return o.m.at.slice();
+  }
+  // 附近隨便一個「進得去」的地方（不在牆裡、離地面有一點高度；在地底的話就留在地底）
+  for (let k = 0; k < 12; k++) {
+    const a = Math.random() * Math.PI * 2, d = 3 + Math.random() * BR.youngRoam;
+    const g = [y.pos[0] + Math.sin(a) * d, y.pos[1] + (Math.random() * 3 - 1.2), y.pos[2] + Math.cos(a) * d];
+    const under = inChamber(y.pos);
+    if (under && !inRoomXZ(g[0], g[2])) continue;
+    const floor = groundHeightAt(g[0], g[2]) + 1.2;
+    g[1] = Math.max(g[1], floor);
+    g[1] = Math.min(g[1], under ? POOL.ceiling_y - 1.2 : FL.ceilingY - 2);
+    const q = g.slice();
+    resolveCollisions(q, 0.6);
+    if (Math.hypot(q[0] - g[0], q[1] - g[1], q[2] - g[2]) < 0.05) return g;
+  }
+  return y.pos.slice();
+}
+
 function updateYoung(dt) {
-  const h = flight.heading;
-  young.forEach((y, k) => {
+  const asleep = sleepBlend > 0.5;                       // 成體睡著時（天亮了），幼體也停下來睡
+  for (const y of young) {
     y.age += dt;
     y.scale = lerp(BR.youngStart, BR.youngScale, smooth(Math.min(1, y.age / BR.growTime)));
-    const side = (k % 2 ? 1 : -1) * (1.2 + Math.floor(k / 2) * 0.9);
-    const back = BR.followDist + Math.floor(k / 2) * 1.3;
-    let target = [
-      flight.pos[0] - Math.sin(h) * back + Math.cos(h) * side,
-      flight.pos[1] + 0.3 + 0.25 * Math.sin(breedClock * 0.8 + k * 2),
-      flight.pos[2] - Math.cos(h) * back - Math.sin(h) * side,
-    ];
-    if (y.age < 4) target = [y.born[0], y.born[1] + 0.8, y.born[2]].map((v, a) => lerp(v, target[a], y.age / 4 * 0.3));
-    for (let a = 0; a < 3; a++) {
-      y.vel[a] += ((target[a] - y.pos[a]) * 3 - y.vel[a] * 2.4) * dt;
+    let input = { fwd: 0, turn: 0, climb: 0 };
+    if (y.age < 4) {                                     // 剛孵出來：在卵旁邊往上飄一點
+      input.climb = clamp1((y.born[1] + 0.8 - y.pos[1]) / 1.5) * 0.5;
+    } else if (!asleep) {
+      y.timer = (y.timer || 0) + dt;
+      if (!y.goal) { y.goal = youngPickGoal(y); y.state = 'go'; y.timer = 0; y.best = Infinity; y.lastProgress = 0; }
+      if (y.state === 'go') {
+        const wp = route(y.goal, y.pos);
+        const st = steerTo(wp, y.pos, y.heading);
+        input = st.input;
+        const real = Math.hypot(...sub(y.goal, y.pos));
+        if (real < y.best - 0.3) { y.best = real; y.lastProgress = y.timer; }
+        if (real < 1.0) { y.state = 'linger'; y.timer = 0; y.lingerFor = lerp(BR.youngLinger[0], BR.youngLinger[1], Math.random()); }
+        else if (y.timer - y.lastProgress > 6) y.goal = null;          // 卡住了：換一個地方
+      } else {
+        input.turn = 0.3 * Math.sin(y.timer * 0.7 + y.born[0]);          // 停下來東張西望
+        if (y.timer > y.lingerFor) y.goal = null;
+      }
     }
-    const sp = Math.hypot(...y.vel);
-    if (sp > 6) y.vel = y.vel.map((v) => v * 6 / sp);
-    for (let a = 0; a < 3; a++) y.pos[a] += y.vel[a] * dt;
+    // 飛起來：和成體一樣的方式（轉向、前進、上升），速度比較慢
+    y.heading += input.turn * FL.turnRate * 0.9 * dt;
+    const want = Math.max(0, input.fwd) * BR.youngSpeed;
+    y.speed = (y.speed || 0) + (want - (y.speed || 0)) * ease(2.5, dt);
+    y.vy = (y.vy || 0) + (input.climb * FL.climbSpeed * 0.8 - (y.vy || 0)) * ease(3, dt);
+    y.pos[0] += Math.sin(y.heading) * y.speed * dt;
+    y.pos[2] += Math.cos(y.heading) * y.speed * dt;
+    y.pos[1] += y.vy * dt;
     const r = 0.95 * y.scale;
     resolveCollisions(y.pos, r);
     y.pos[1] = Math.max(y.pos[1], groundHeightAt(y.pos[0], y.pos[2]) + r + 0.15);
-    // 離太遠（例如被天花板擋在地底）：直接回到成體旁邊
-    if (Math.hypot(y.pos[0] - flight.pos[0], y.pos[1] - flight.pos[1], y.pos[2] - flight.pos[2]) > 30) y.pos = target.slice();
-    const want = sp > 0.4 ? Math.atan2(y.vel[0], y.vel[2]) : h;
-    y.heading += wrapAngle(want - y.heading) * ease(4, dt);
-  });
+    y.pos[1] = Math.min(y.pos[1], FL.ceilingY);
+  }
 }
 
 // 幼體的姿勢：借用成體這一幀的動作（拍翅、脈動、睡覺），搬到幼體的位置、縮小
@@ -1502,12 +1538,11 @@ const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp1 = (x) => Math.max(-1, Math.min(1, x));
 
 // 朝目標飛：路上有東西擋住就先往上爬，越過去再前進；快到了就減速、對準高度
-function steerTo(goal) {
-  const p = flight.pos;
+function steerTo(goal, p = flight.pos, heading = flight.heading) {
   const d = sub(goal, p);
   const hd = Math.hypot(d[0], d[2]);
   const dist = Math.hypot(d[0], d[1], d[2]);
-  const diff = wrapAngle(Math.atan2(d[0], d[2]) - flight.heading);
+  const diff = wrapAngle(Math.atan2(d[0], d[2]) - heading);
   let fwd = hd > 0.6 ? Math.max(0, 1 - Math.abs(diff) / 1.2) * Math.min(1, hd / 4) : 0;
   let climb = clamp1(d[1] / 1.5);
   if (dist > 1.5) {
@@ -1524,9 +1559,8 @@ function steerTo(goal) {
 }
 
 // 要進出地底時，先經過洞口：地面上 → 洞口正上方 → 往下穿過洞口 → 地底（出來時反過來）
-function route(goal) {
+function route(goal, p = flight.pos) {
   if (!POOL) return goal;
-  const p = flight.pos;
   const hc = [(POOL.hole[0] + POOL.hole[1]) / 2, (POOL.hole[2] + POOL.hole[3]) / 2];
   const nearHole = Math.hypot(p[0] - hc[0], p[2] - hc[1]) < 1.8;
   const inShaft = inHoleXZ(p[0], p[2]) && p[1] < POOL.surface_y + 1.5 && p[1] > POOL.ceiling_y - 1.5;

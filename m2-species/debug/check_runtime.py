@@ -168,15 +168,19 @@ CHECKS = [
     // 1. 一直往前飛，體力會減少，累了之後飛得比較慢
     // 每一幀都把牠放回空曠的高空，只看體力對速度的影響（不會撞到場景裡的樹、車、牆而減速）
     const open = () => { flight.pos = [0, 10, 0]; };
+    // 秒數依設定算：飛完「一半體力」的時間，應該剩一半
+    const half = 0.5 / CONFIG.stamina.flyDrain;
     keys.add('KeyW');
-    for (let i = 0; i < 60 * 30; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); open(); }
-    info.飛30秒後的體力 = +stamina.toFixed(2);
+    for (let i = 0; i < 60 * half; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); open(); }
+    info['飛' + Math.round(half) + '秒後的體力'] = +stamina.toFixed(2);
+    const halfLeft = stamina;
     const fastSpeed = flight.speed;
-    for (let i = 0; i < 60 * 20; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); open(); }
+    const tiredAt = (0.5 - CONFIG.stamina.tiredBelow * 0.4) / CONFIG.stamina.flyDrain;   // 飛到體力很低、看得出累
+    for (let i = 0; i < 60 * tiredAt; i++) { updateFlight(i / 60, 1 / 60); updateStamina(1 / 60); open(); }
     info.累了的速度比 = +(flight.speed / fastSpeed).toFixed(2);
     // 2. 繼續飛到累倒：自己進入睡覺
     let n = 0;
-    while (mode !== 'sleep' && n++ < 60 * 30) { updateFlight(n / 60, 1 / 60); updateStamina(1 / 60); }
+    while (mode !== 'sleep' && n++ < 60 * 120) { updateFlight(n / 60, 1 / 60); updateStamina(1 / 60); }
     info.累倒後的模式 = mode; info.是累倒的 = exhausted;
     // 3. 剛累倒時按方向鍵、Z 叫不醒
     sleepBlend = 1;
@@ -190,7 +194,7 @@ CHECKS = [
     while (mode === 'sleep' && n++ < 60 * 60) { sleepBlend = 1; updateStamina(1 / 60); }
     info.醒來時的體力 = +stamina.toFixed(2); info.醒來後的模式 = mode;
     __t.reset();
-    return { ok: info.飛30秒後的體力 < 0.6 && info.飛30秒後的體力 > 0.4 && info.累了的速度比 < 0.9
+    return { ok: halfLeft < 0.55 && halfLeft > 0.45 && info.累了的速度比 < 0.9
                && info.累倒後的模式 === 'sleep' && info.是累倒的 && info.剛累倒時按鍵後的模式 === 'sleep'
                && info.醒來後的模式 === 'hover' && info.醒來時的體力 >= 0.99, info };
   }"""),
@@ -289,7 +293,7 @@ CHECKS = [
     return { ok: snaps === 0 && tested >= 10, info: { 測了幾個細的東西旁邊: tested, 突然拉近的次數: snaps } };
   }"""),
 
-  ("D16", "地底冷卻池與繁殖：地面擋得住、只有洞口下得去；不在池邊不能分裂；自己飛去池邊分裂、卵黏在池壁水面上方；孵化的幼體會跟著飛出地底", """async () => {
+  ("D16", "地底冷卻池與繁殖：地面擋得住、只有洞口下得去；不在池邊不能分裂；自己飛去池邊分裂、卵黏在池壁水面上方；孵化的幼體會自己到處飛（不是跟著成體）", """async () => {
     const info = {};
     const step = (n, until) => { for (let i = 0; i < n; i++) { const dt = 1 / 60; updateBrain(dt); updateFlight(i * dt, dt); updateStamina(dt);
         const pose = animate(i * dt, dt); updateSpores(i * dt, dt, pose); updateFungi(dt); updateBreeding(dt); if (until && until()) return i; } return n; };
@@ -316,24 +320,32 @@ CHECKS = [
       info.卵離池壁 = +Math.min(Math.abs(e.p[0] - x0), Math.abs(e.p[0] - x1), Math.abs(e.p[2] - z0), Math.abs(e.p[2] - z1)).toFixed(2);
       info.卵在水面上方 = +(e.p[1] - POOL.water_y).toFixed(2);
     }
-    // 5. 孵化，成體飛出地底，幼體跟著
+    // 5. 孵化：成體停著不動，幼體自己到處飛（不是跟著成體）
     brain.disabled = true; brain.input = null;
     for (const x of eggs) x.age = x.hatchAt - 0.05;
     step(10);
     info.孵出幾隻 = young.length;
-    brain.disabled = false; brain.idle = 999;
-    const car = LANDMARKS.find((m) => m.kind === 1);
-    startGoing('explore', car.at, car.look, '汽車');
-    step(60 * 150, () => !inChamber(flight.pos) && flight.pos[1] > POOL.surface_y + 1 && Math.hypot(flight.pos[0] - hc[0], flight.pos[2] - hc[1]) > 8);
-    step(60 * 5);
     const y = young[0];
-    info.成體在地面上 = !inChamber(flight.pos);
-    info.幼體離成體 = y ? +Math.hypot(...sub(y.pos, flight.pos)).toFixed(2) : null;
-    info.幼體也出來了 = y ? !inChamber(y.pos) : false;
+    let pathLen = 0, maxAway = 0, inside = 0, goals = new Set();
+    const parent = flight.pos.slice();
+    for (let k = 0; k < 60 * 90; k++) {
+      const before = y.pos.slice();
+      step(1);
+      flight.pos = parent.slice(); flight.speed = 0;            // 成體一直待在原地
+      pathLen += Math.hypot(...sub(y.pos, before));
+      maxAway = Math.max(maxAway, Math.hypot(...sub(y.pos, parent)));
+      if (y.goal) goals.add(y.goal.map((v) => v.toFixed(1)).join());
+      const q = y.pos.slice(); resolveCollisions(q, 0.95 * y.scale);
+      if (Math.hypot(...sub(q, y.pos)) > 0.05) inside++;
+    }
+    info.幼體90秒飛了幾公尺 = +pathLen.toFixed(1);
+    info.幼體去過幾個地方 = goals.size;
+    info.離成體最遠 = +maxAway.toFixed(1);
+    info.幼體卡在東西裡的影格 = inside;
     __t.reset(); flight.pos = [0, 0, 0];
     const ok = info.房間上方往下飛 === '停在地面上' && info.洞口往下飛 === '進到地底' && info.地面上按R.startsWith('還不能分裂')
       && e && info.卵離池壁 < BR.eggRadius + 0.05 && info.卵在水面上方 > 0.1 && e.p[1] < POOL.rim_y
-      && info.孵出幾隻 === 1 && info.成體在地面上 && info.幼體離成體 < 6 && info.幼體也出來了;
+      && info.孵出幾隻 === 1 && info.幼體90秒飛了幾公尺 > 15 && info.幼體去過幾個地方 >= 3 && info.離成體最遠 > 5 && info.幼體卡在東西裡的影格 === 0;
     return { ok, info };
   }"""),
 
