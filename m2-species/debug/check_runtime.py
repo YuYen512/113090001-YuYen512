@@ -42,7 +42,8 @@ window.__t = {
   // 檢查時把時間停在半夜（不然跑到一半天亮，生物會自己去睡覺，干擾其他項目）
   reset() { keys.clear(); flight.speed = 0; flight.vy = 0; flight.turn = 0; stamina = 1; exhausted = false;
             dayClock.frozen = true; dayClock.speed = 1; dayClock.phase = 0; daySleep = false;
-            brain.disabled = true; brain.state = 'manual'; brain.input = null; setMode('fly'); },
+            brain.disabled = true; brain.state = 'manual'; brain.input = null;
+            eggs.length = 0; young.length = 0; split = null; breedCooldown = 0; setMode('fly'); },
 };
 """
 
@@ -286,6 +287,54 @@ CHECKS = [
     }
     __t.reset(); flight.pos = [0, 0, 0];
     return { ok: snaps === 0 && tested >= 10, info: { 測了幾個細的東西旁邊: tested, 突然拉近的次數: snaps } };
+  }"""),
+
+  ("D16", "地底冷卻池與繁殖：地面擋得住、只有洞口下得去；不在池邊不能分裂；自己飛去池邊分裂、卵黏在池壁水面上方；孵化的幼體會跟著飛出地底", """async () => {
+    const info = {};
+    const step = (n, until) => { for (let i = 0; i < n; i++) { const dt = 1 / 60; updateBrain(dt); updateFlight(i * dt, dt); updateStamina(dt);
+        const pose = animate(i * dt, dt); updateSpores(i * dt, dt, pose); updateFungi(dt); updateBreeding(dt); if (until && until()) return i; } return n; };
+    // 1. 地底房間上方（不是洞口）往下飛 5 秒：會停在地面上，不會掉進地底
+    __t.reset(); const [rx0, rx1, rz0, rz1] = POOL.room;
+    flight.pos = [rx1 - 3, POOL.surface_y + 2, rz1 - 3]; keys.add('KeyQ'); step(300); keys.clear();
+    info.房間上方往下飛 = inChamber(flight.pos) ? '掉進地底（錯）' : '停在地面上';
+    // 2. 洞口上方往下飛：下得去
+    const hc = [(POOL.hole[0] + POOL.hole[1]) / 2, (POOL.hole[2] + POOL.hole[3]) / 2];
+    flight.pos = [hc[0], POOL.surface_y + 2, hc[1]]; keys.add('KeyQ'); step(60 * 12); keys.clear();
+    info.洞口往下飛 = inChamber(flight.pos) ? '進到地底' : '下不去（錯）';
+    // 3. 在地面上按 R：不能分裂
+    __t.reset(); flight.pos = [0, 0, 0];
+    info.地面上按R = tryBreed() ? '分裂了（錯）' : breedMsg.text;
+    // 4. 從起點自己飛去冷卻池、分裂
+    brain.disabled = false; brain.idle = 999;
+    const pool = LANDMARKS.find((m) => m.kind === 5);
+    brain.lastMark = pool; startGoing('explore', pool.at, pool.look, '冷卻池');
+    const t1 = step(60 * 120, () => eggs.length > 0);
+    info.幾秒產下卵 = +(t1 / 60).toFixed(1);
+    const e = eggs[0];
+    if (e) {
+      const [x0, x1, z0, z1] = POOL.pool;
+      info.卵離池壁 = +Math.min(Math.abs(e.p[0] - x0), Math.abs(e.p[0] - x1), Math.abs(e.p[2] - z0), Math.abs(e.p[2] - z1)).toFixed(2);
+      info.卵在水面上方 = +(e.p[1] - POOL.water_y).toFixed(2);
+    }
+    // 5. 孵化，成體飛出地底，幼體跟著
+    brain.disabled = true; brain.input = null;
+    for (const x of eggs) x.age = x.hatchAt - 0.05;
+    step(10);
+    info.孵出幾隻 = young.length;
+    brain.disabled = false; brain.idle = 999;
+    const car = LANDMARKS.find((m) => m.kind === 1);
+    startGoing('explore', car.at, car.look, '汽車');
+    step(60 * 150, () => !inChamber(flight.pos) && flight.pos[1] > POOL.surface_y + 1 && Math.hypot(flight.pos[0] - hc[0], flight.pos[2] - hc[1]) > 8);
+    step(60 * 5);
+    const y = young[0];
+    info.成體在地面上 = !inChamber(flight.pos);
+    info.幼體離成體 = y ? +Math.hypot(...sub(y.pos, flight.pos)).toFixed(2) : null;
+    info.幼體也出來了 = y ? !inChamber(y.pos) : false;
+    __t.reset(); flight.pos = [0, 0, 0];
+    const ok = info.房間上方往下飛 === '停在地面上' && info.洞口往下飛 === '進到地底' && info.地面上按R.startsWith('還不能分裂')
+      && e && info.卵離池壁 < BR.eggRadius + 0.05 && info.卵在水面上方 > 0.1 && e.p[1] < POOL.rim_y
+      && info.孵出幾隻 === 1 && info.成體在地面上 && info.幼體離成體 < 6 && info.幼體也出來了;
+    return { ok, info };
   }"""),
 
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {

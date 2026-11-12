@@ -5,6 +5,7 @@
 //!   - 廢棄工廠：鏽蝕廠房、塌了一半的鋸齒屋頂、斷頂的煙囪
 //!   - 遠方兩座冷卻塔的剪影
 //!   - 歪斜破損的鐵絲網、刺鐵絲，網上掛著輻射警告牌
+//!   - 地面塌陷的破洞，底下是廢棄的地底冷卻池（cooling_pool.rs）：牠繁殖的地方
 //!   - 自然把人造物吞掉（overgrowth.rs）：樹從廢墟裡長出來、藤蔓把鐵絲網拉倒、汽車半埋在土裡長滿苔蘚
 //!
 //! 座標：y 朝上，地面大約在 y = -3。生物從原點附近出發。
@@ -19,6 +20,7 @@ use crate::math::Vec3;
 use crate::mesh::Mesh;
 use std::f32::consts::{PI, TAU};
 
+mod cooling_pool;
 mod overgrowth;
 
 const KIND_GROUND: f32 = 0.0;
@@ -67,6 +69,8 @@ pub struct EnvironmentConfig {
     pub cars: Vec<(f32, f32, f32)>,
     /// 每段鐵絲網被藤蔓拉倒的柱子數
     pub fence_collapse: usize,
+    /// 地面塌陷、底下是冷卻池的位置 (x, z)（會自動對齊地面網格）
+    pub pool_site: (f32, f32),
 }
 
 impl Default for EnvironmentConfig {
@@ -95,6 +99,7 @@ impl Default for EnvironmentConfig {
             rubble_count: 160,
             cars: vec![(9.0, 10.0, 30.0), (-15.0, 4.0, 110.0), (25.0, -3.0, -40.0), (-28.0, -5.0, 70.0), (3.0, -47.0, 15.0)],
             fence_collapse: 3,
+            pool_site: (0.0, 52.0),
         }
     }
 }
@@ -230,7 +235,9 @@ pub fn ground_height(cfg: &EnvironmentConfig, x: f32, z: f32) -> f32 {
     let rough = smoothstep(cfg.flat_radius, cfg.flat_radius * 2.2, r);
     let hills = (fbm(x * 0.025, z * 0.025, seed) - 0.45) * 3.2;
     let bumps = (fbm(x * 0.15, z * 0.15, seed + 7) - 0.5) * 0.35;
-    cfg.ground_y + rough * (hills + bumps)
+    // 冷卻池上方和附近整平（地底房間的天花板是平的）
+    let near_pool = smoothstep(4.0, 14.0, cooling_pool::layout(cfg).dist_to_room(x, z));
+    cfg.ground_y + rough * near_pool * (hills + bumps)
 }
 
 // ---------------------------------------------------------------------
@@ -377,8 +384,13 @@ fn build_ground(cfg: &EnvironmentConfig) -> Mesh {
         }
     }
     let row = (n + 1) as u32;
+    let (hi, hj) = cooling_pool::layout(cfg).cell;
     for i in 0..n as u32 {
         for j in 0..n as u32 {
+            // 塌陷的洞口：這 2×2 格不畫地面
+            if (hi as u32..hi as u32 + 2).contains(&i) && (hj as u32..hj as u32 + 2).contains(&j) {
+                continue;
+            }
             let a = i * row + j;
             m.add_tri(a, a + row, a + row + 1);
             m.add_tri(a, a + row + 1, a + 1);
@@ -1002,6 +1014,11 @@ pub fn build(cfg: &EnvironmentConfig) -> Environment {
     for &(x, z, yaw) in &cfg.cars {
         overgrowth::build_car(cfg, &mut rng, &mut structures, &mut plants, x, z, yaw);
     }
+    // 地面塌陷的洞口：先把蓋在洞口上的草和碎石拿掉，再蓋地底的冷卻池
+    let pool = cooling_pool::layout(cfg);
+    cooling_pool::carve(&mut plants, &pool);
+    cooling_pool::carve(&mut structures.mesh, &pool);
+    cooling_pool::build(cfg, &mut rng, &mut structures, &mut plants);
 
     // 探索點：每塊警告牌前面（從警告牌的四個角算出中心和朝向）
     for q in 0..signs.positions.len() / 4 {
@@ -1049,7 +1066,7 @@ impl Environment {
             .collect();
         format!(
             "{{\"params\":{{\"ground_y\":{},\"flat_radius\":{},\"ground_size\":{},\"ground_grid\":{}}},\
-             \"colliders\":{{\"boxes\":[{}],\"cylinders\":[{}]}},\"landmarks\":[{}],\"shelters\":[{}],\"parts\":[{}]}}",
+             \"colliders\":{{\"boxes\":[{}],\"cylinders\":[{}]}},\"landmarks\":[{}],\"shelters\":[{}],\"pool\":{},\"parts\":[{}]}}",
             crate::mesh::fmt_f(cfg.ground_y),
             crate::mesh::fmt_f(cfg.flat_radius),
             crate::mesh::fmt_f(cfg.ground_size),
@@ -1058,6 +1075,7 @@ impl Environment {
             cyls.join(","),
             self.structures.marks.iter().map(|m| format!("[{},{},{}]", v(m.at), v(m.look), m.kind)).collect::<Vec<_>>().join(","),
             self.structures.shelters.iter().map(|s| format!("[{},{}]", v(s.at), s.kind)).collect::<Vec<_>>().join(","),
+            cooling_pool::layout(cfg).to_json(),
             parts.join(",")
         )
     }

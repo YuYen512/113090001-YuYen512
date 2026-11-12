@@ -18,8 +18,8 @@ const UP: Vec3 = Vec3 { x: 0.0, y: 1.0, z: 0.0 };
 //  基本形狀
 // ---------------------------------------------------------------------
 
-/// 沿著一串點的管子（樹幹、樹枝、輪胎）。radii 和 points 一樣多。
-fn add_tube(m: &mut Mesh, points: &[Vec3], radii: &[f32], sides: usize, s: &Surface) {
+/// 沿著一串點的管子（樹幹、樹枝、輪胎、管線）。radii 和 points 一樣多。
+pub(super) fn add_tube(m: &mut Mesh, points: &[Vec3], radii: &[f32], sides: usize, s: &Surface) {
     let start = m.positions.len() as u32;
     let mut normal = Vec3::new(1.0, 0.0, 0.0);
     for i in 0..points.len() {

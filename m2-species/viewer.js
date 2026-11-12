@@ -133,6 +133,28 @@ const CONFIG = {
     wakeAt: 0.5,               // 累倒睡著後，體力恢復到多少才叫得醒
   },
 
+  // 地底冷卻池
+  coolingPool: {
+    glow: [0.06, 0.26, 0.7],   // 池水藍光的顏色和亮度
+    light: [0.12, 0.42, 1.0],  // 池水照亮四周牆壁的光
+  },
+
+  // 繁殖：自行分裂。在地底冷卻池邊，核心分出一小顆光，包成卵黏在池壁上，孵出幼體
+  breeding: {
+    minStamina: 0.5,           // 體力至少要多少才能分裂
+    cost: 0.3,                 // 分裂一次用掉多少體力
+    splitTime: 5,              // 分裂的過程幾秒
+    cooldown: 25,              // 分裂完要隔幾秒才能再分裂
+    incubate: 80,              // 卵幾秒後孵化（每顆會差一點）
+    maxOffspring: 5,           // 卵和幼體加起來最多幾隻
+    eggRadius: 0.16,           // 卵的大小（半徑）
+    youngStart: 0.22,          // 剛孵出來的幼體是成體的幾倍大
+    youngScale: 0.42,          // 長大後（還是幼體）是成體的幾倍大
+    growTime: 90,              // 幾秒長到 youngScale
+    youngGlow: 0.55,           // 幼體的菌絲和核心比成體暗多少（菌絲還很微弱）
+    followDist: 2.4,           // 幼體跟在成體後面多遠
+  },
+
   // 自己的行為：沒人操作時自己探索、天快亮時自己找地方躲起來
   autonomy: {
     enabled: true,
@@ -142,7 +164,7 @@ const CONFIG = {
     sowHeight: 2.0,            // 停下來撒孢子時，降到離下面多高
     seekHour: 3,               // 幾點開始找地方躲（6 點天亮；正常速度下大約有 45 秒可以飛過去）
     seekTimeout: 45,           // 找躲藏點最多花幾秒，超過就原地睡
-    giveUpAfter: 25,           // 一個探索目標飛了幾秒還到不了，就換一個
+    giveUpAfter: 25,           // 一個探索目標飛了幾秒還到不了，就換一個（遠的地方會依距離多給一點時間）
   },
   // 孢子落地長出的真菌：人類的廢墟慢慢被發光的菌斑覆蓋
   fungus: {
@@ -528,6 +550,98 @@ void main() {
   o = vec4(vec3(0.5, 0.9, 0.85) * g, 1.0);
 }`;
 
+// 卵：半透明的殼，裡面有一顆會脈動的小光核（從成體核心分出來的）和微弱的菌絲
+// 快孵化時光核越來越亮、殼會微微顫動。kind = 1 是正在從成體身上分出去的光球
+const EGG_VS = `#version 300 es
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 i_pos;
+layout(location=2) in vec4 i_info;        // 半徑、種子、孵化進度（0～1）、種類（0 卵 / 1 光球）
+uniform mat4 u_view, u_proj; uniform float u_time;
+out vec3 v_w, v_n, v_c; out vec4 v_info;
+void main() {
+  float r = i_info.x * (1.0 + 0.15 * i_info.z);
+  float shake = smoothstep(0.88, 1.0, i_info.z) * 0.06 * sin(u_time * 14.0 + i_info.y * 30.0);
+  r *= 1.0 + shake;
+  vec3 stretch = a_pos * vec3(1.0, 1.15, 1.0);                       // 稍微長一點，像一顆卵
+  v_w = i_pos + stretch * r;
+  v_n = normalize(a_pos); v_c = i_pos; v_info = i_info;
+  gl_Position = u_proj * u_view * vec4(v_w, 1.0);
+}`;
+const EGG_FS = `#version 300 es
+precision highp float;
+in vec3 v_w, v_n, v_c; in vec4 v_info; out vec4 o;
+uniform vec3 u_camPos, u_shell, u_core; uniform float u_time;
+float h3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float n3(vec3 x) {
+  vec3 i = floor(x); vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+void main() {
+  float prog = v_info.z, seed = v_info.y, r = v_info.x;
+  vec3 V = normalize(u_camPos - v_w);
+  vec3 N = normalize(v_n);
+  if (dot(N, V) < 0.0) N = -N;
+  float fres = pow(1.0 - abs(dot(N, V)), 2.5);
+  // 視線離卵中心多近 → 裡面的光核
+  vec3 rd = -V;
+  vec3 oc = v_c - u_camPos;
+  float closest = length(oc - rd * dot(oc, rd)) / r;
+  float beat = 0.5 + 0.5 * sin(u_time * mix(1.2, 4.0, prog * prog) + seed * 20.0);
+  float nucleus = exp(-closest * closest * 9.0) * (0.35 + 0.5 * prog + 0.3 * beat);
+  // 微弱的菌絲（卵裡本來就有）
+  float line = 1.0 - smoothstep(0.0, 0.07, abs(n3(v_n * 3.2 + seed * 9.0) - 0.5));
+  float hyphae = line * (0.25 + 0.5 * prog) * (0.6 + 0.4 * beat);
+  if (v_info.w > 0.5) {                                                  // 分出去中的光球：中間最亮、邊緣柔和
+    float edge = 1.0 - fres;
+    o = vec4(u_core * (0.5 + 1.0 * edge) * (0.8 + 0.4 * beat), clamp(0.15 + 0.85 * edge * edge, 0.0, 1.0));
+    return;
+  }
+  vec3 col = u_shell * (0.15 + 0.6 * fres) + u_core * (nucleus * 1.4 + hyphae * 0.5);
+  float a = 0.18 + 0.55 * fres + nucleus * 0.6 + hyphae * 0.3;
+  o = vec4(col, clamp(a, 0.0, 1.0));
+}`;
+
+// 冷卻池的水：人類離開很久了，池水還留著一點餘溫，發出淡淡的藍光
+// （真實的核燃料冷卻池裡，水會發出藍色的「契忍可夫輻射」光）
+const WATER_VS = `#version 300 es
+layout(location=0) in vec2 a_corner;
+uniform mat4 u_view, u_proj; uniform vec4 u_rect; uniform float u_y;
+out vec3 v_w;
+void main() {
+  vec2 t = a_corner * 0.5 + 0.5;
+  v_w = vec3(mix(u_rect.x, u_rect.y, t.x), u_y, mix(u_rect.z, u_rect.w, t.y));
+  gl_Position = u_proj * u_view * vec4(v_w, 1.0);
+}`;
+const WATER_FS = `#version 300 es
+precision highp float;
+in vec3 v_w; out vec4 o;
+uniform vec3 u_camPos, u_glow, u_corePos, u_coreColor; uniform float u_time, u_coreI; uniform vec4 u_rect;
+float h21(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y);
+}
+void main() {
+  vec2 p = v_w.xz;
+  // 水面的小波紋（兩層往不同方向慢慢流）
+  float w1 = vnoise(p * 1.3 + vec2(u_time * 0.12, u_time * 0.05));
+  float w2 = vnoise(p * 2.7 - vec2(u_time * 0.07, u_time * 0.11));
+  float caustic = pow(1.0 - abs(w1 + w2 - 1.0), 6.0);
+  // 越靠池中央越深、越亮（光從池底的深處發出來）
+  vec2 c = vec2(u_rect.x + u_rect.y, u_rect.z + u_rect.w) * 0.5, h = vec2(u_rect.y - u_rect.x, u_rect.w - u_rect.z) * 0.5;
+  vec2 q = abs(p - c) / h;
+  float center = 1.0 - smoothstep(0.2, 1.0, max(q.x, q.y));
+  vec3 V = normalize(u_camPos - v_w);
+  float fres = pow(1.0 - max(V.y, 0.0), 3.0);
+  vec3 col = u_glow * (0.35 + 0.65 * center) * (0.8 + 0.5 * caustic);
+  col += vec3(0.6, 0.8, 1.0) * fres * 0.08;
+  // 生物飛近時，牠的光倒映在水面上
+  vec3 L = u_corePos - v_w;
+  col += u_coreColor * u_coreI * 0.6 / (1.0 + dot(L, L) * 0.25) * (0.6 + 0.4 * caustic);
+  o = vec4(col, 0.94);
+}`;
+
 // 真菌：貼在表面上的一片發光菌斑（菌絲網 + 幾顆小菇），會呼吸般明滅；生物靠近時亮起來
 const FUNGUS_VS = `#version 300 es
 layout(location=0) in vec2 a_corner;
@@ -600,9 +714,22 @@ in vec3 v_wpos; in vec3 v_nrm; in vec2 v_uv; in vec3 v_col; in float v_w;
 uniform int u_mat;                        // 0 一般、1 鐵絲網、2 警告牌
 uniform vec3 u_camPos, u_moonDir, u_moonColor, u_skyAmb, u_groundAmb, u_fogColor, u_corePos, u_coreColor;
 uniform float u_coreI, u_coreLight, u_fogDensity;
+// 地底冷卻池：房間範圍 (x0, x1, z0, z1)、洞口範圍、天花板底面高度、池水的光（位置、顏色）
+uniform vec4 u_room, u_hole; uniform float u_ceilY; uniform vec3 u_poolLightPos, u_poolLight;
 out vec4 o;
 
 float hash3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+
+// 在地底嗎？（1 = 在地底房間裡，月光、陽光照不到；洞口正下方有一點天光漏下來）
+float underground() {
+  vec2 p = v_wpos.xz;
+  float inRoom = step(u_room.x, p.x) * step(p.x, u_room.y) * step(u_room.z, p.y) * step(p.y, u_room.w);
+  float below = 1.0 - smoothstep(u_ceilY - 0.05, u_ceilY + 0.05, v_wpos.y);
+  vec2 hc = vec2(u_hole.x + u_hole.y, u_hole.z + u_hole.w) * 0.5, hh = vec2(u_hole.y - u_hole.x, u_hole.w - u_hole.z) * 0.5;
+  vec2 q = abs(p - hc) - hh;
+  float shaft = 1.0 - smoothstep(0.0, 4.0, max(q.x, q.y));       // 洞口附近
+  return inRoom * below * (1.0 - 0.55 * shaft);
+}
 float noise3(vec3 x) {
   vec3 i = floor(x); vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);
   return mix(mix(mix(hash3(i), hash3(i + vec3(1,0,0)), f.x), mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
@@ -617,11 +744,19 @@ vec3 lit(vec3 N, vec3 base) {
   float d2 = dot(L, L);
   float facing = max(dot(N, L * inversesqrt(max(d2, 1e-4))), 0.0) * 0.75 + 0.25;
   vec3 core = u_coreColor * u_coreI * u_coreLight * facing / (1.0 + d2 * 0.12);
-  return base * (amb + u_moonColor * moon + core);
+  // 地底：天光幾乎照不到，只剩池水淡淡的藍光
+  float ug = underground();
+  vec3 P = u_poolLightPos - v_wpos;
+  float pd2 = dot(P, P);
+  float pf = max(dot(N, P * inversesqrt(max(pd2, 1e-4))), 0.0) * 0.8 + 0.2;
+  vec3 pool = u_poolLight * pf / (1.0 + pd2 * 0.03) * ug;
+  vec3 sky = (amb + u_moonColor * moon) * (1.0 - ug) + vec3(0.012, 0.014, 0.02) * ug;
+  return base * (sky + core + pool);
 }
 vec3 fogged(vec3 c) {
   float d = length(v_wpos - u_camPos);
-  return mix(c, u_fogColor, 1.0 - exp(-d * u_fogDensity));
+  vec3 fogC = mix(u_fogColor, vec3(0.005, 0.012, 0.025), underground());   // 地底的霧是暗的
+  return mix(c, fogC, 1.0 - exp(-d * u_fogDensity));
 }
 
 void main() {
@@ -788,6 +923,8 @@ const progMote = compile(MOTE_VS, MOTE_FS);
 const progFloor = compile(FLOOR_VS, FLOOR_FS);
 const progEnv = compile(ENV_VS, ENV_FS);
 const progFungus = compile(FUNGUS_VS, FUNGUS_FS);
+const progWater = compile(WATER_VS, WATER_FS);
+const progEgg = compile(EGG_VS, EGG_FS);
 const progSpore = compile(SPORE_VS, SPORE_FS);
 
 function uploadMesh(mesh) {
@@ -893,6 +1030,7 @@ const staminaBar = document.getElementById('staminaBar');
 const staminaText = document.getElementById('staminaText');
 const clockEl = document.getElementById('clock');
 const fungusEl = document.getElementById('fungusCount');
+const offspringEl = document.getElementById('offspring');
 const modeButtons = document.querySelectorAll('.seg button[data-mode]');
 function setMode(m) {
   mode = m;
@@ -938,6 +1076,7 @@ window.addEventListener('keydown', (e) => {
   // FIXED(D02): 長按 Z 時，按鍵自動重複（e.repeat）不再切換睡覺／醒來
   if (e.code === 'KeyZ') { if (!e.repeat) requestMode(mode === 'sleep' ? 'hover' : 'sleep'); return; }
   if (e.code === 'KeyT') { if (!e.repeat) dayClock.speed = dayClock.speed > 1 ? 1 : DN.fastForward; return; }   // 時間快轉
+  if (e.code === 'KeyR') { if (!e.repeat) tryBreed(); return; }                                                        // 分裂
   if (CONTROL_KEYS.includes(e.code)) {
     e.preventDefault();
     keys.add(e.code);
@@ -989,7 +1128,20 @@ const GROUND = ENV ? {
 } : null;
 
 // 地形高度（從地面網格雙線性內插）
+// 地底冷卻池（Rust 產生的位置和尺寸）
+const POOL = ENV && ENV.pool ? ENV.pool : null;
+const inRoomXZ = (x, z) => POOL && x > POOL.room[0] && x < POOL.room[1] && z > POOL.room[2] && z < POOL.room[3];
+const inPoolXZ = (x, z) => POOL && x > POOL.pool[0] && x < POOL.pool[1] && z > POOL.pool[2] && z < POOL.pool[3];
+const inHoleXZ = (x, z, m = 0) => POOL && x > POOL.hole[0] - m && x < POOL.hole[1] + m && z > POOL.hole[2] - m && z < POOL.hole[3] + m;
+const inChamber = (p) => inRoomXZ(p[0], p[2]) && p[1] < POOL.ceiling_y + 0.5;    // 在地底房間裡
+
+// 地面高度：在地底房間的範圍裡是房間的地板（冷卻池裡是水面）。
+// 地面上飛過房間上方時，會被天花板（碰撞方塊）擋住，只有洞口那裡掉得下去
 function groundHeightAt(x, z) {
+  if (inRoomXZ(x, z)) return inPoolXZ(x, z) ? POOL.water_y : POOL.floor_y;
+  return terrainHeightAt(x, z);
+}
+function terrainHeightAt(x, z) {
   if (!GROUND) return CONFIG.flight.floorY;
   const { pos, n, size } = GROUND;
   const step = size / n;
@@ -1088,9 +1240,10 @@ function updateFlight(t, dt) {
     turn: (held('KeyA', 'ArrowLeft') ? 1 : 0) - (held('KeyD', 'ArrowRight') ? 1 : 0),
     climb: (held('Space', 'KeyE') ? 1 : 0) - (held('ShiftLeft', 'ShiftRight', 'KeyQ') ? 1 : 0),
   };
-  const fwd = awake ? src.fwd : 0;
-  const turnIn = awake ? src.turn : 0;
-  const climb = awake ? src.climb : 0;
+  const still = !awake || split;                     // 分裂的時候停在原地
+  const fwd = still ? 0 : src.fwd;
+  const turnIn = still ? 0 : src.turn;
+  const climb = still ? 0 : src.climb;
 
   const vigor = staminaVigor();                // 累的時候飛得比較慢
   const targetSpeed = (fwd > 0 ? FL.maxSpeed * fwd : fwd < 0 ? 0.35 * FL.maxSpeed * fwd : 0) * lerp(CONFIG.stamina.slowest, 1, vigor);
@@ -1117,11 +1270,204 @@ function updateFlight(t, dt) {
 }
 
 // ---------------------------------------------------------------------
+//  繁殖：自行分裂 → 卵黏在池壁上 → 孵化 → 幼體跟著成體飛
+// ---------------------------------------------------------------------
+const BR = CONFIG.breeding;
+const eggs = [];          // { p, n, age, hatchAt, seed }
+const young = [];         // { pos, vel, heading, age, scale }
+let split = null;         // 正在分裂：{ t, site, n }
+let breedCooldown = 0;
+let breedMsg = { text: '', until: -1 };
+let breedClock = 0;
+
+// 離成體最近的池壁內側（卵黏的地方）。不在池邊就回傳 null
+function poolWallSite() {
+  if (!POOL || !inChamber(flight.pos)) return null;
+  const p = flight.pos, [x0, x1, z0, z1] = POOL.pool;
+  if (p[1] > POOL.rim_y + 3.5) return null;
+  const faces = [
+    { d: Math.abs(p[0] - x0), n: [1, 0, 0], at: (a) => [x0, a, 'z'] },
+    { d: Math.abs(p[0] - x1), n: [-1, 0, 0], at: (a) => [x1, a, 'z'] },
+    { d: Math.abs(p[2] - z0), n: [0, 0, 1], at: (a) => [a, z0, 'x'] },
+    { d: Math.abs(p[2] - z1), n: [0, 0, -1], at: (a) => [a, z1, 'x'] },
+  ];
+  // 只算「在這面牆的範圍前面」的牆
+  const valid = faces.filter((f) => (f.n[0] ? p[2] > z0 - 1 && p[2] < z1 + 1 : p[0] > x0 - 1 && p[0] < x1 + 1));
+  if (!valid.length) return null;
+  const f = valid.reduce((a, b) => (b.d < a.d ? b : a));
+  if (f.d > 3.5) return null;
+  return f;
+}
+// 這面牆上要黏卵的位置：已經有卵的話黏在旁邊（一串一串的），不然就在正前方
+function eggSpot(face) {
+  const [x0, x1, z0, z1] = POOL.pool;
+  const alongX = !face.n[0];
+  const lo = (alongX ? x0 : z0) + 0.4, hi = (alongX ? x1 : z1) - 0.4;
+  const onFace = eggs.filter((e) => e.n[0] === face.n[0] && e.n[2] === face.n[2]);
+  let a = alongX ? flight.pos[0] : flight.pos[2];
+  const near = onFace.filter((e) => Math.abs((alongX ? e.p[0] : e.p[2]) - a) < 2);
+  if (near.length) a = (alongX ? near[0].p[0] : near[0].p[2]) + (Math.random() < 0.5 ? -1 : 1) * (0.3 + 0.3 * Math.random());
+  a = Math.max(lo, Math.min(hi, a));
+  const band = POOL.rim_y - POOL.water_y;
+  const y = POOL.water_y + band * (0.25 + 0.6 * Math.random());
+  const off = BR.eggRadius + 0.01;
+  const w = face.at(a);
+  const p = w[2] === 'z' ? [w[0], y, w[1]] : [w[0], y, w[1]];
+  return [p[0] + face.n[0] * off, p[1], p[2] + face.n[2] * off];
+}
+
+// 現在不能分裂的原因（可以的話回傳 null）
+function breedBlocker() {
+  if (split) return '正在分裂';
+  if (mode === 'sleep') return '睡著了';
+  if (!poolWallSite()) return '要在地底冷卻池的池邊才能分裂';
+  if (stamina < BR.minStamina) return `體力不夠（要 ${Math.round(BR.minStamina * 100)}% 以上）`;
+  if (eggs.length + young.length >= BR.maxOffspring) return '已經有很多後代了';
+  if (breedCooldown > 0) return '剛分裂完，休息一下';
+  return null;
+}
+function tryBreed() {
+  const why = breedBlocker();
+  if (why) { breedMsg = { text: '還不能分裂：' + why, until: breedClock + 2.5 }; return false; }
+  const face = poolWallSite();
+  split = { t: 0, site: eggSpot(face), n: face.n.slice() };
+  return true;
+}
+
+function updateBreeding(dt) {
+  breedClock += dt;
+  breedCooldown = Math.max(0, breedCooldown - dt);
+  if (split) {
+    split.t += dt;
+    if (split.t >= BR.splitTime) {                                 // 光球黏上池壁，變成一顆卵
+      eggs.push({ p: split.site, n: split.n, age: 0, hatchAt: BR.incubate * (0.85 + 0.3 * Math.random()), seed: Math.random() });
+      stamina = Math.max(0, stamina - BR.cost);
+      breedCooldown = BR.cooldown;
+      split = null;
+      breedMsg = { text: '產下一顆卵', until: breedClock + 3 };
+    }
+  }
+  for (let i = eggs.length - 1; i >= 0; i--) {
+    const e = eggs[i];
+    e.age += dt;
+    if (e.age >= e.hatchAt) {                                     // 孵化
+      eggs.splice(i, 1);
+      young.push({ pos: [e.p[0] + e.n[0] * 0.5, e.p[1] + 0.2, e.p[2] + e.n[2] * 0.5], vel: [e.n[0] * 0.6, 0.4, e.n[2] * 0.6],
+                   heading: Math.atan2(e.n[0], e.n[2]), age: 0, scale: BR.youngStart, born: e.p.slice() });
+      breedMsg = { text: '卵孵化了！', until: breedClock + 3 };
+    }
+  }
+  updateYoung(dt);
+}
+
+// 幼體：跟在成體後面左右排開飛；剛孵出來的前幾秒先在卵旁邊飄一下
+function updateYoung(dt) {
+  const h = flight.heading;
+  young.forEach((y, k) => {
+    y.age += dt;
+    y.scale = lerp(BR.youngStart, BR.youngScale, smooth(Math.min(1, y.age / BR.growTime)));
+    const side = (k % 2 ? 1 : -1) * (1.2 + Math.floor(k / 2) * 0.9);
+    const back = BR.followDist + Math.floor(k / 2) * 1.3;
+    let target = [
+      flight.pos[0] - Math.sin(h) * back + Math.cos(h) * side,
+      flight.pos[1] + 0.3 + 0.25 * Math.sin(breedClock * 0.8 + k * 2),
+      flight.pos[2] - Math.cos(h) * back - Math.sin(h) * side,
+    ];
+    if (y.age < 4) target = [y.born[0], y.born[1] + 0.8, y.born[2]].map((v, a) => lerp(v, target[a], y.age / 4 * 0.3));
+    for (let a = 0; a < 3; a++) {
+      y.vel[a] += ((target[a] - y.pos[a]) * 3 - y.vel[a] * 2.4) * dt;
+    }
+    const sp = Math.hypot(...y.vel);
+    if (sp > 6) y.vel = y.vel.map((v) => v * 6 / sp);
+    for (let a = 0; a < 3; a++) y.pos[a] += y.vel[a] * dt;
+    const r = 0.95 * y.scale;
+    resolveCollisions(y.pos, r);
+    y.pos[1] = Math.max(y.pos[1], groundHeightAt(y.pos[0], y.pos[2]) + r + 0.15);
+    // 離太遠（例如被天花板擋在地底）：直接回到成體旁邊
+    if (Math.hypot(y.pos[0] - flight.pos[0], y.pos[1] - flight.pos[1], y.pos[2] - flight.pos[2]) > 30) y.pos = target.slice();
+    const want = sp > 0.4 ? Math.atan2(y.vel[0], y.vel[2]) : h;
+    y.heading += wrapAngle(want - y.heading) * ease(4, dt);
+  });
+}
+
+// 幼體的姿勢：借用成體這一幀的動作（拍翅、脈動、睡覺），搬到幼體的位置、縮小
+function youngPose(pose, y) {
+  const A = Mat.chain(
+    Mat.translate(...y.pos), Mat.rotY(y.heading), Mat.scale(y.scale),
+    Mat.rotY(-pose.anchorYaw), Mat.translate(-pose.anchor[0], -pose.anchor[1], -pose.anchor[2]),
+  );
+  return Object.assign({}, pose, {
+    world: pose.world.map((m) => Mat.mul(A, m)),
+    glowScale: pose.glowScale * BR.youngGlow,
+    coreI: pose.coreI * lerp(0.6, 1, BR.youngGlow),
+    tendril: [pose.tendril[0], pose.tendril[1], pose.tendril[2], pose.tendril[3] * y.scale],
+  });
+}
+
+// 卵和分裂中光球的繪製資料
+const EGG_FLOATS = 7;
+const eggCpu = new Float32Array((BR.maxOffspring + 2) * EGG_FLOATS);
+const eggBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, eggBuf);
+gl.bufferData(gl.ARRAY_BUFFER, eggCpu.byteLength, gl.DYNAMIC_DRAW);
+const eggVao = gl.createVertexArray();
+let eggIndexCount = 0;
+{
+  gl.bindVertexArray(eggVao);
+  const pos = [], idx = [], R = 10, S = 14;
+  for (let i = 0; i <= R; i++) for (let j = 0; j <= S; j++) {
+    const th = Math.PI * i / R, ph = 2 * Math.PI * j / S;
+    pos.push(Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph));
+  }
+  for (let i = 0; i < R; i++) for (let j = 0; j < S; j++) {
+    const a = i * (S + 1) + j;
+    idx.push(a, a + S + 1, a + 1, a + 1, a + S + 1, a + S + 2);
+  }
+  eggIndexCount = idx.length;
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, eggBuf);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, EGG_FLOATS * 4, 0);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, EGG_FLOATS * 4, 12);
+  gl.vertexAttribDivisor(1, 1); gl.vertexAttribDivisor(2, 1);
+  gl.bindVertexArray(null);
+}
+// 分裂中的光球在哪裡：前一段在核心裡慢慢長大，後一段從核心飛向池壁
+function budState(corePos) {
+  if (!split) return null;
+  const u = smooth(Math.max(0, Math.min(1, (split.t / BR.splitTime - 0.4) / 0.6)));
+  const p = [0, 1, 2].map((a) => lerp(corePos[a], split.site[a], u));
+  p[1] += Math.sin(Math.PI * u) * 0.35;
+  const grow = Math.min(1, split.t / (BR.splitTime * 0.4));
+  return { p, r: u > 0 ? lerp(0.07, BR.eggRadius, u) : 0.03 + 0.04 * grow, landing: u };
+}
+function fillEggs(corePos) {
+  let n = 0;
+  const put = (p, r, seed, prog, kind) => {
+    const o = n * EGG_FLOATS;
+    eggCpu.set([p[0], p[1], p[2], r, seed, prog, kind], o);
+    n++;
+  };
+  for (const e of eggs) put(e.p, BR.eggRadius, e.seed, Math.min(1, e.age / e.hatchAt), 0);
+  const bud = budState(corePos);
+  if (bud) put(bud.p, bud.r, 0.5, 0, bud.landing > 0.97 ? 0 : 1);
+  gl.bindBuffer(gl.ARRAY_BUFFER, eggBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, eggCpu, 0, n * EGG_FLOATS);
+  return n;
+}
+
+// ---------------------------------------------------------------------
 //  牠自己的行為（brain）：沒人操作時自己探索；天快亮時自己飛去躲起來睡
 //  做法：brain 決定「要去哪裡」，再換成和按鍵一樣的指令（前進、轉向、上升）交給飛行
 // ---------------------------------------------------------------------
 const AU = CONFIG.autonomy;
-const LANDMARK_NAMES = ['大樹', '汽車', '警告牌', '廢墟', '真菌'];
+const LANDMARK_NAMES = ['大樹', '汽車', '警告牌', '廢墟', '真菌', '冷卻池'];
 const LANDMARKS = ENV && ENV.landmarks ? ENV.landmarks.map((m) => ({ at: [m[0], m[1], m[2]], look: [m[3], m[4], m[5]], kind: m[6] })) : [];
 // 躲藏點：只留下「生物真的進得去」的（不卡在牆或樓板裡、正上方沒有東西擋住，從上面可以直接降落進去）
 // （第一次用到時才檢查：碰撞和射線的程式在檔案後面才準備好）
@@ -1132,6 +1478,7 @@ function shelters() {
     const p = s.at.slice();
     resolveCollisions(p, FL.collisionRadius + 0.15);
     if (Math.hypot(p[0] - s.at[0], p[1] - s.at[1], p[2] - s.at[2]) > 0.05) return false;
+    if (s.kind === 2) return true;                        // 地底：從洞口進去（route 會帶路），不用檢查正上方
     const up = FL.ceilingY - 1 - s.at[1];
     return up > 0 && rayClearance(s.at, [0, 1, 0], up) >= up - 0.01;
   });
@@ -1176,6 +1523,19 @@ function steerTo(goal) {
   return { input: { fwd, turn: clamp1(diff * 2), climb }, dist, hd };
 }
 
+// 要進出地底時，先經過洞口：地面上 → 洞口正上方 → 往下穿過洞口 → 地底（出來時反過來）
+function route(goal) {
+  if (!POOL) return goal;
+  const p = flight.pos;
+  const hc = [(POOL.hole[0] + POOL.hole[1]) / 2, (POOL.hole[2] + POOL.hole[3]) / 2];
+  const nearHole = Math.hypot(p[0] - hc[0], p[2] - hc[1]) < 1.8;
+  const inShaft = inHoleXZ(p[0], p[2]) && p[1] < POOL.surface_y + 1.5 && p[1] > POOL.ceiling_y - 1.5;
+  const pIn = inChamber(p), gIn = inChamber(goal);
+  if (gIn && !pIn) return inShaft || nearHole ? [hc[0], POOL.floor_y + 4, hc[1]] : [hc[0], POOL.surface_y + 3, hc[1]];
+  if (!gIn && (pIn || inShaft)) return nearHole ? [hc[0], POOL.surface_y + 3.5, hc[1]] : [hc[0], POOL.ceiling_y - 2.5, hc[1]];
+  return goal;
+}
+
 function nearestShelter() {
   let best = null, bd = Infinity;
   for (const s of shelters()) {
@@ -1194,7 +1554,10 @@ function pickLandmark() {
   // 越近的地方越容易被選中，但不要一直回到剛剛那個
   const options = LANDMARKS.filter((m) => m !== brain.lastMark).map((m) => {
     const d = Math.hypot(m.at[0] - flight.pos[0], m.at[2] - flight.pos[2]);
-    return { m, w: Math.exp(-d / 25) };
+    let w = Math.exp(-d / 25);
+    // 冷卻池：體力夠、後代還不多的時候特別想去（去繁殖）
+    if (m.kind === 5) w *= stamina >= BR.minStamina && eggs.length + young.length < BR.maxOffspring ? 6 : 0.3;
+    return { m, w };
   });
   let r = Math.random() * options.reduce((a, o) => a + o.w, 0);
   for (const o of options) { if ((r -= o.w) <= 0) return o.m; }
@@ -1204,11 +1567,15 @@ function pickLandmark() {
 function startGoing(state, goal, look, label) {
   brain.state = state; brain.goal = goal; brain.look = look; brain.label = label;
   brain.timer = 0; brain.best = Infinity; brain.lastProgress = 0;
+  // 遠的地方多給一點時間（要進出地底的話再多一點）
+  const far = Math.hypot(...sub(goal, flight.pos)) / FL.maxSpeed;
+  brain.giveUp = Math.max(AU.giveUpAfter, far * 2 + (POOL && inChamber(goal) !== inChamber(flight.pos) ? 20 : 0));
 }
 
 function updateBrain(dt) {
   brain.idle += dt;
   if (brain.disabled || !AU.enabled) { brain.input = null; return; }
+  if (split) { brain.input = null; return; }                // 分裂的時候不動
   if (mode === 'sleep') { brain.input = null; if (brain.state !== 'hidden') brain.state = 'manual'; return; }
   if (brain.state === 'hidden') brain.state = 'manual';     // 醒來了
   brain.timer += dt;
@@ -1223,9 +1590,10 @@ function updateBrain(dt) {
   }
   if (brain.state === 'seek') {
     if (mode !== 'fly') setMode('fly');
-    const st = steerTo(brain.goal);
+    const st = steerTo(route(brain.goal));
     brain.input = st.input;
-    if (st.dist < 0.9 || brain.timer > AU.seekTimeout) {     // 到了（或找太久了）：就地睡
+    const realDist = Math.hypot(...sub(brain.goal, flight.pos));
+    if (realDist < 0.9 || brain.timer > AU.seekTimeout) {     // 到了（或找太久了）：就地睡
       brain.state = 'hidden'; brain.input = null;
       daySleep = true; keys.clear(); setMode('sleep');
     }
@@ -1252,13 +1620,17 @@ function updateBrain(dt) {
   }
   if (brain.state === 'explore') {
     if (mode !== 'fly') setMode('fly');
-    const st = steerTo(brain.goal);
+    const wp = route(brain.goal);
+    const wpKey = wp.map((x) => x.toFixed(1)).join();
+    if (wpKey !== brain.wpKey) { brain.wpKey = wpKey; brain.best = Infinity; brain.lastProgress = brain.timer; }  // 換下一段路
+    const st = steerTo(wp);
     brain.input = st.input;
     if (st.dist < brain.best - 0.5) { brain.best = st.dist; brain.lastProgress = brain.timer; }
-    if (st.dist < 1.2) {                                     // 到了：停下來看一看
+    const realDist = Math.hypot(...sub(brain.goal, flight.pos));
+    if (realDist < 1.2) {                                    // 到了：停下來看一看
       brain.state = 'linger'; brain.timer = 0;
       brain.lingerFor = lerp(AU.linger[0], AU.linger[1], Math.random());
-    } else if (brain.timer - brain.lastProgress > 8 || brain.timer > AU.giveUpAfter) {
+    } else if (brain.timer - brain.lastProgress > 8 || brain.timer > brain.giveUp) {
       brain.state = 'manual'; brain.idle = AU.idleDelay;     // 到不了：換一個地方
     }
     return;
@@ -1271,7 +1643,17 @@ function updateBrain(dt) {
     const below = Math.min(rayClearance(flight.pos, [0, -1, 0], 30), flight.pos[1] - groundHeightAt(flight.pos[0], flight.pos[2]));
     const sink = Math.max(0, below - AU.sowHeight);
     brain.input = { fwd: 0, turn: clamp1(diff * 1.5) * 0.6, climb: -clamp1(sink / 1.5) * 0.6 };
-    if (brain.timer > brain.lingerFor) { brain.state = 'manual'; brain.idle = AU.idleDelay; }
+    // 在冷卻池邊、可以分裂的時候：分裂（繁殖）；只差一點體力的話，就在池邊休息到夠了
+    if (brain.label === '冷卻池' && !split && brain.timer > 1.5) {
+      const why = breedBlocker();
+      if (!why) {
+        tryBreed();
+        brain.lingerFor = brain.timer + BR.splitTime + 3;
+      } else if (why.startsWith('體力') && brain.timer < 40) {
+        brain.lingerFor = Math.max(brain.lingerFor, brain.timer + 1);
+      }
+    }
+    if (brain.timer > brain.lingerFor && !split) { brain.state = 'manual'; brain.idle = AU.idleDelay; }
   }
 }
 
@@ -1279,7 +1661,7 @@ function brainStatus() {
   switch (brain.state) {
     case 'seek': return isDaytime() ? '天亮了！' + brain.label : '天快亮了，' + brain.label;
     case 'explore': return '自己探索中 · 去看看' + brain.label;
-    case 'linger': return '正在看' + brain.label + '…';
+    case 'linger': return brain.label === '冷卻池' ? '在冷卻池邊' : '正在看' + brain.label + '…';
     case 'rest': return '自己探索中 · 累了，休息一下';
     default: return null;
   }
@@ -1443,16 +1825,22 @@ function animate(t, dt) {
   breathePhase += breatheSpeed * dt;            // 累加相位：改變速度時不會跳動
   const breathe = 0.5 + 0.5 * Math.sin(breathePhase);
   const wave = lerp(breathe, flapPulse, k);
-  const coreI = p.pulseBase + p.pulseAmp * wave;
+  let coreI = p.pulseBase + p.pulseAmp * wave;
+  if (split) {                                          // 分裂中：核心快速閃動、越來越亮
+    const g = smooth(Math.min(1, split.t / 1.2)) * (1 - smooth(Math.max(0, (split.t - BR.splitTime * 0.7) / (BR.splitTime * 0.3))));
+    coreI += g * (0.5 + 0.5 * Math.sin(t * 11));
+  }
 
   const bob = -p.bob * Math.sin(phase - 0.6) + 0.06 * Math.sin(t * 0.7);
   const noseDownAwake = -p.pitchDeg + 2.5 * s * k + 8 * speedFrac - 14 * (flight.vy / FL.climbSpeed);
   const noseDown = lerp(noseDownAwake + 10 * tired, 90, sk);   // 累的時候頭垂下來一點  // 睡覺：翻成頭朝下、尾巴朝上
   const bank = -FL.bankDeg * (flight.turn / FL.turnRate) * (1 - sk);
   const swing = 3 * Math.sin(t * 0.5) * (1 - sk) + 2.5 * Math.sin(t * 0.33) * sk;   // 睡著時飄在空中輕輕晃
+  const anchor = [flight.pos[0], flight.pos[1] + bob, flight.pos[2]];
+  const anchorYaw = flight.heading + deg(4) * Math.sin(t * 0.37) * (1 - sk);
   const root = Mat.chain(
-    Mat.translate(flight.pos[0], flight.pos[1] + bob, flight.pos[2]),
-    Mat.rotY(flight.heading + deg(4) * Math.sin(t * 0.37) * (1 - sk)),
+    Mat.translate(...anchor),
+    Mat.rotY(anchorYaw),
     Mat.rotX(deg(noseDown)),
     Mat.rotZ(deg(bank + swing)),
   );
@@ -1515,6 +1903,7 @@ function animate(t, dt) {
     phase, pulsePhase, pulseFreq: p.flapFreq / N, fly: k, pulseBase: p.pulseBase, pulseAmp: p.pulseAmp,
     sleep: sk, breathePhase, breatheSpeed, glowScale: lerp(1, SL.glow, sk) * (1 - 0.5 * tired), tendril, tired,
     eyeGlow: CONFIG.eyeSpots.glow * lerp(1, CONFIG.eyeSpots.sleepGlow, sk),
+    anchor, anchorYaw,                                  // 幼體借用這一幀的動作時，用來換算位置
   };
 }
 
@@ -1654,6 +2043,7 @@ function updateSpores(t, dt, pose) {
 const FG = CONFIG.fungus;
 const fungi = [];
 function seedFungus(p, n) {
+  if (inPoolXZ(p[0], p[2]) && p[1] < POOL.water_y + 0.05) return;     // 掉進水裡的孢子長不出真菌
   for (const f of fungi) {
     const d = Math.hypot(f.p[0] - p[0], f.p[1] - p[1], f.p[2] - p[2]);
     if (d < FG.mergeDist && dot(f.n, n) > 0.8) { f.target = Math.min(FG.maxSize, f.target + FG.growPerSpore); return; }
@@ -1796,175 +2186,8 @@ function drawPart(part, pose, cull) {
   }
 }
 
-// 翅膀膜，再把光點與小菌絲用加法混合疊在上面
-function drawWing(wing, glow, pose, side) {
-  gl.uniform1f(progMain.u.u_side, side);
-  drawPart(wing, pose, false);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-  drawPart(glow, pose, false);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-}
-
-let last = performance.now();
-const startTime = last;
-
-function frame(now) {
-  const dt = Math.min((now - last) / 1000, 0.05);
-  last = now;
-  const t = (now - startTime) / 1000;
-  resize();
-  gl.viewport(0, 0, canvas.width, canvas.height);
-
-  updateBrain(dt);
-  updateFlight(t, dt);
-  updateStamina(dt);
-  updateDayNight(dt);
-  updateFungi(dt);
-  const sky = skyState(dayClock.phase);
-  const eye = updateCamera(t, dt);
-  const aspect = canvas.width / canvas.height;
-  const view = Mat.lookAt(eye, cam.target, [0, 1, 0]);
-  const proj = Mat.perspective(deg(CONFIG.camera.fov), aspect, 0.1, 600);
-  const pose = animate(t, dt);
-  const corePos = Mat.apply(pose.world[boneIndex.core], [0, 0, 0]);
-  updateSpores(t, dt, pose);
-
-  let statusText = mode === 'sleep' ? (pose.sleep > 0.95 ? (exhausted ? '累倒了，睡覺恢復中' : '睡覺中') : (exhausted ? '累倒了…' : '準備入睡…'))
-    : pose.sleep > 0.05 ? '醒來中…'
-    : flight.moving ? '飛行中 · 移動' : (pose.fly > 0.5 ? '飛行中' : '漂浮中');
-  if (mode === 'sleep' && daySleep && pose.sleep > 0.95 && !exhausted) statusText = brain.state === 'hidden' ? '白天 · 躲起來睡覺（天黑會醒來）' : '白天 · 睡覺中（天黑會醒來）';
-  const bs = brainStatus();
-  if (bs && mode !== 'sleep') statusText = bs;
-  if (mode !== 'sleep' && isDaytime()) statusText += ' · 白天很耗體力';
-  if (mode !== 'sleep' && stamina < CONFIG.stamina.tiredBelow) statusText += ' · 累了';
-  const ct = clockText();
-  if (clockEl.textContent !== ct) clockEl.textContent = ct;
-  const fc = fungi.length + ' 片';
-  if (fungusEl.textContent !== fc) fungusEl.textContent = fc;
-  if (now / 1000 - wakeBlockedAt < 1.5) statusText = '太累了，叫不醒…';
-  if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
-  const pct = Math.round(stamina * 100);
-  if (staminaText.textContent !== pct + '%') {
-    staminaText.textContent = pct + '%';
-    staminaBar.style.width = pct + '%';
-    staminaBar.classList.toggle('low', stamina < CONFIG.stamina.tiredBelow);
-  }
-
-  gl.clearColor(0, 0, 0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-  // 1. 背景
-  gl.disable(gl.CULL_FACE);
-  gl.disable(gl.DEPTH_TEST);
-  gl.disable(gl.BLEND);
-  gl.useProgram(progBg.program);
-  {
-    const bu = progBg.u;
-    const f = norm(sub(cam.target, eye)), r = norm(cross(f, [0, 1, 0])), uu = cross(r, f);
-    gl.uniform3fv(bu.u_camF, f); gl.uniform3fv(bu.u_camR, r); gl.uniform3fv(bu.u_camU, uu);
-    gl.uniform1f(bu.u_tanH, Math.tan(deg(CONFIG.camera.fov) / 2));
-    gl.uniform1f(bu.u_aspect, aspect);
-    gl.uniform1f(bu.u_time, t);
-    gl.uniform3fv(bu.u_top, sky.top); gl.uniform3fv(bu.u_horizon, sky.horizon);
-    gl.uniform3fv(bu.u_sunDir, sky.sunDir); gl.uniform3fv(bu.u_moonDir, sky.moonDir);
-    gl.uniform3fv(bu.u_twiColor, DN.duskHorizon);
-    gl.uniform1f(bu.u_day, sky.day); gl.uniform1f(bu.u_twi, sky.twi); gl.uniform1f(bu.u_stars, DN.stars);
-  }
-  gl.bindVertexArray(emptyVao);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-  // 2. 環境（不透明的先畫，鐵絲網半透明最後畫）
-  if (ENV) {
-    const E = CONFIG.environment;
-    const eu = progEnv.u;
-    gl.useProgram(progEnv.program);
-    gl.uniformMatrix4fv(eu.u_view, false, view);
-    gl.uniformMatrix4fv(eu.u_proj, false, proj);
-    gl.uniform1f(eu.u_time, t);
-    gl.uniform1f(eu.u_wind, E.wind);
-    gl.uniform3fv(eu.u_camPos, eye);
-    gl.uniform3fv(eu.u_moonDir, sky.lightDir);          // 主要的光（白天太陽、夜裡月亮）
-    gl.uniform3fv(eu.u_moonColor, sky.lightColor);
-    gl.uniform3fv(eu.u_skyAmb, sky.skyAmb);
-    gl.uniform3fv(eu.u_groundAmb, sky.groundAmb);
-    gl.uniform3fv(eu.u_fogColor, sky.fogColor);
-    gl.uniform1f(eu.u_fogDensity, E.fogDensity);
-    gl.uniform3fv(eu.u_corePos, corePos);
-    gl.uniform3fv(eu.u_coreColor, colors.core);
-    gl.uniform1f(eu.u_coreI, pose.coreI);
-    gl.uniform1f(eu.u_coreLight, E.coreLight);
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthMask(true);
-    gl.disable(gl.BLEND);
-    for (const part of envParts) {
-      if (part.mat === 1) continue;
-      gl.uniform1i(eu.u_mat, part.mat);
-      gl.bindVertexArray(part.vao);
-      gl.drawElements(gl.TRIANGLES, part.count, gl.UNSIGNED_INT, 0);
-    }
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.depthMask(false);
-    for (const part of envParts) {
-      if (part.mat !== 1) continue;
-      gl.uniform1i(eu.u_mat, part.mat);
-      gl.bindVertexArray(part.vao);
-      gl.drawElements(gl.TRIANGLES, part.count, gl.UNSIGNED_INT, 0);
-    }
-  }
-
-  // 真菌（加法混合；貼在表面上，會被前面的東西擋住）
-  if (fungi.length) {
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE);
-    gl.depthMask(false);
-    gl.enable(gl.DEPTH_TEST);
-    gl.useProgram(progFungus.program);
-    const fu = progFungus.u;
-    gl.uniformMatrix4fv(fu.u_view, false, view);
-    gl.uniformMatrix4fv(fu.u_proj, false, proj);
-    gl.uniform3fv(fu.u_color, colors.core);
-    gl.uniform3fv(fu.u_corePos, corePos);
-    gl.uniform1f(fu.u_coreI, pose.coreI);
-    gl.uniform1f(fu.u_time, t);
-    gl.uniform1f(fu.u_glow, lerp(FG.glow, FG.dayGlow, sky.day));
-    gl.bindVertexArray(fungusVao);
-    // 貼在表面上的薄片容易和地面搶「誰在前面」而出現雜點，讓它的深度往鏡頭拉近一點
-    gl.enable(gl.POLYGON_OFFSET_FILL);
-    gl.polygonOffset(-4, -16);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, fungi.length);
-    gl.disable(gl.POLYGON_OFFSET_FILL);
-  }
-
-  // 微光粒子（加法混合；有環境時會被建築擋住）
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.ONE, gl.ONE);
-  gl.depthMask(false);
-  if (ENV) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
-  if (!ENV) {
-  gl.useProgram(progFloor.program);
-  gl.uniformMatrix4fv(progFloor.u.u_view, false, view);
-  gl.uniformMatrix4fv(progFloor.u.u_proj, false, proj);
-  gl.uniform3fv(progFloor.u.u_center, cam.target);
-  gl.uniform1f(progFloor.u.u_floorY, FL.floorY);
-  gl.uniform3fv(progFloor.u.u_corePos, corePos);
-  gl.uniform3fv(progFloor.u.u_coreColor, colors.core);
-  gl.uniform1f(progFloor.u.u_coreI, pose.coreI);
-  gl.bindVertexArray(quadVao);
-  gl.drawArrays(gl.TRIANGLES, 0, 6);
-  }
-
-  gl.useProgram(progMote.program);
-  gl.uniformMatrix4fv(progMote.u.u_view, false, view);
-  gl.uniformMatrix4fv(progMote.u.u_proj, false, proj);
-  gl.uniform1f(progMote.u.u_time, t);
-  gl.uniform1f(progMote.u.u_scale, 22 * canvas.height / 900);
-  gl.uniform1f(progMote.u.u_night, 1 - sky.day);
-  gl.uniform3fv(progMote.u.u_center, cam.target);
-  gl.bindVertexArray(moteVao);
-  gl.drawArrays(gl.POINTS, 0, CONFIG.moteCount);
-
-  // 3. 生物本體
+// 畫一隻生物（成體或幼體）：先畫不透明的核心，再由遠到近畫半透明的身體和翅膀
+function drawCreature(pose, corePos, view, proj, eye, t) {
   gl.useProgram(progMain.program);
   const u = progMain.u;
   gl.uniformMatrix4fv(u.u_view, false, view);
@@ -2038,6 +2261,242 @@ function frame(now) {
   ];
   groups.sort((a, b) => b.d - a.d).forEach((g) => g.draw());
 
+}
+
+// 翅膀膜，再把光點與小菌絲用加法混合疊在上面
+function drawWing(wing, glow, pose, side) {
+  gl.uniform1f(progMain.u.u_side, side);
+  drawPart(wing, pose, false);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  drawPart(glow, pose, false);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+}
+
+let last = performance.now();
+const startTime = last;
+
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  const t = (now - startTime) / 1000;
+  resize();
+  gl.viewport(0, 0, canvas.width, canvas.height);
+
+  updateBrain(dt);
+  updateFlight(t, dt);
+  updateStamina(dt);
+  updateDayNight(dt);
+  updateFungi(dt);
+  updateBreeding(dt);
+  const sky = skyState(dayClock.phase);
+  const eye = updateCamera(t, dt);
+  const aspect = canvas.width / canvas.height;
+  const view = Mat.lookAt(eye, cam.target, [0, 1, 0]);
+  const proj = Mat.perspective(deg(CONFIG.camera.fov), aspect, 0.1, 600);
+  const pose = animate(t, dt);
+  const corePos = Mat.apply(pose.world[boneIndex.core], [0, 0, 0]);
+  updateSpores(t, dt, pose);
+
+  let statusText = mode === 'sleep' ? (pose.sleep > 0.95 ? (exhausted ? '累倒了，睡覺恢復中' : '睡覺中') : (exhausted ? '累倒了…' : '準備入睡…'))
+    : pose.sleep > 0.05 ? '醒來中…'
+    : flight.moving ? '飛行中 · 移動' : (pose.fly > 0.5 ? '飛行中' : '漂浮中');
+  if (mode === 'sleep' && daySleep && pose.sleep > 0.95 && !exhausted) statusText = brain.state === 'hidden' ? '白天 · 躲起來睡覺（天黑會醒來）' : '白天 · 睡覺中（天黑會醒來）';
+  const bs = brainStatus();
+  if (bs && mode !== 'sleep') statusText = bs;
+  if (mode !== 'sleep' && !split && !breedBlocker()) statusText = '在冷卻池邊 · 按 R 分裂';
+  if (split) statusText = '正在分裂…';
+  if (breedClock < breedMsg.until) statusText = breedMsg.text;
+  const oc = `卵 ${eggs.length} · 幼體 ${young.length}`;
+  if (offspringEl.textContent !== oc) offspringEl.textContent = oc;
+  if (mode !== 'sleep' && isDaytime()) statusText += ' · 白天很耗體力';
+  if (mode !== 'sleep' && stamina < CONFIG.stamina.tiredBelow) statusText += ' · 累了';
+  const ct = clockText();
+  if (clockEl.textContent !== ct) clockEl.textContent = ct;
+  const fc = fungi.length + ' 片';
+  if (fungusEl.textContent !== fc) fungusEl.textContent = fc;
+  if (now / 1000 - wakeBlockedAt < 1.5) statusText = '太累了，叫不醒…';
+  if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
+  const pct = Math.round(stamina * 100);
+  if (staminaText.textContent !== pct + '%') {
+    staminaText.textContent = pct + '%';
+    staminaBar.style.width = pct + '%';
+    staminaBar.classList.toggle('low', stamina < CONFIG.stamina.tiredBelow);
+  }
+
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  // 1. 背景
+  gl.disable(gl.CULL_FACE);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+  gl.useProgram(progBg.program);
+  {
+    const bu = progBg.u;
+    const f = norm(sub(cam.target, eye)), r = norm(cross(f, [0, 1, 0])), uu = cross(r, f);
+    gl.uniform3fv(bu.u_camF, f); gl.uniform3fv(bu.u_camR, r); gl.uniform3fv(bu.u_camU, uu);
+    gl.uniform1f(bu.u_tanH, Math.tan(deg(CONFIG.camera.fov) / 2));
+    gl.uniform1f(bu.u_aspect, aspect);
+    gl.uniform1f(bu.u_time, t);
+    gl.uniform3fv(bu.u_top, sky.top); gl.uniform3fv(bu.u_horizon, sky.horizon);
+    gl.uniform3fv(bu.u_sunDir, sky.sunDir); gl.uniform3fv(bu.u_moonDir, sky.moonDir);
+    gl.uniform3fv(bu.u_twiColor, DN.duskHorizon);
+    gl.uniform1f(bu.u_day, sky.day); gl.uniform1f(bu.u_twi, sky.twi); gl.uniform1f(bu.u_stars, DN.stars);
+  }
+  gl.bindVertexArray(emptyVao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // 2. 環境（不透明的先畫，鐵絲網半透明最後畫）
+  if (ENV) {
+    const E = CONFIG.environment;
+    const eu = progEnv.u;
+    gl.useProgram(progEnv.program);
+    gl.uniformMatrix4fv(eu.u_view, false, view);
+    gl.uniformMatrix4fv(eu.u_proj, false, proj);
+    gl.uniform1f(eu.u_time, t);
+    gl.uniform1f(eu.u_wind, E.wind);
+    gl.uniform3fv(eu.u_camPos, eye);
+    gl.uniform3fv(eu.u_moonDir, sky.lightDir);          // 主要的光（白天太陽、夜裡月亮）
+    gl.uniform3fv(eu.u_moonColor, sky.lightColor);
+    gl.uniform3fv(eu.u_skyAmb, sky.skyAmb);
+    gl.uniform3fv(eu.u_groundAmb, sky.groundAmb);
+    gl.uniform3fv(eu.u_fogColor, sky.fogColor);
+    if (POOL) {
+      gl.uniform4f(eu.u_room, ...POOL.room);
+      gl.uniform4f(eu.u_hole, ...POOL.hole);
+      gl.uniform1f(eu.u_ceilY, POOL.ceiling_y);
+      gl.uniform3f(eu.u_poolLightPos, (POOL.pool[0] + POOL.pool[1]) / 2, POOL.water_y + 1.5, (POOL.pool[2] + POOL.pool[3]) / 2);
+      const breathe = 0.9 + 0.1 * Math.sin(t * 0.6);
+      gl.uniform3fv(eu.u_poolLight, CONFIG.coolingPool.light.map((x) => x * breathe));
+    } else {
+      gl.uniform4f(eu.u_room, 1, 0, 1, 0);
+    }
+    gl.uniform1f(eu.u_fogDensity, E.fogDensity);
+    gl.uniform3fv(eu.u_corePos, corePos);
+    gl.uniform3fv(eu.u_coreColor, colors.core);
+    gl.uniform1f(eu.u_coreI, pose.coreI);
+    gl.uniform1f(eu.u_coreLight, E.coreLight);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    for (const part of envParts) {
+      if (part.mat === 1) continue;
+      gl.uniform1i(eu.u_mat, part.mat);
+      gl.bindVertexArray(part.vao);
+      gl.drawElements(gl.TRIANGLES, part.count, gl.UNSIGNED_INT, 0);
+    }
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    for (const part of envParts) {
+      if (part.mat !== 1) continue;
+      gl.uniform1i(eu.u_mat, part.mat);
+      gl.bindVertexArray(part.vao);
+      gl.drawElements(gl.TRIANGLES, part.count, gl.UNSIGNED_INT, 0);
+    }
+  }
+
+  // 冷卻池的水
+  if (POOL) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.disable(gl.CULL_FACE);
+    gl.useProgram(progWater.program);
+    const wu = progWater.u;
+    gl.uniformMatrix4fv(wu.u_view, false, view);
+    gl.uniformMatrix4fv(wu.u_proj, false, proj);
+    gl.uniform4f(wu.u_rect, ...POOL.pool);
+    gl.uniform1f(wu.u_y, POOL.water_y);
+    gl.uniform3fv(wu.u_camPos, eye);
+    gl.uniform3fv(wu.u_glow, CONFIG.coolingPool.glow);
+    gl.uniform3fv(wu.u_corePos, corePos);
+    gl.uniform3fv(wu.u_coreColor, colors.core);
+    gl.uniform1f(wu.u_coreI, pose.coreI);
+    gl.uniform1f(wu.u_time, t);
+    gl.bindVertexArray(fungusVao);                       // 借用真菌的四邊形（只用到角落座標）
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  // 真菌（加法混合；貼在表面上，會被前面的東西擋住）
+  if (fungi.length) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.depthMask(false);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(progFungus.program);
+    const fu = progFungus.u;
+    gl.uniformMatrix4fv(fu.u_view, false, view);
+    gl.uniformMatrix4fv(fu.u_proj, false, proj);
+    gl.uniform3fv(fu.u_color, colors.core);
+    gl.uniform3fv(fu.u_corePos, corePos);
+    gl.uniform1f(fu.u_coreI, pose.coreI);
+    gl.uniform1f(fu.u_time, t);
+    gl.uniform1f(fu.u_glow, lerp(FG.glow, FG.dayGlow, sky.day));
+    gl.bindVertexArray(fungusVao);
+    // 貼在表面上的薄片容易和地面搶「誰在前面」而出現雜點，讓它的深度往鏡頭拉近一點
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-4, -16);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, fungi.length);
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+  }
+
+  // 微光粒子（加法混合；有環境時會被建築擋住）
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.depthMask(false);
+  if (ENV) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
+  if (!ENV) {
+  gl.useProgram(progFloor.program);
+  gl.uniformMatrix4fv(progFloor.u.u_view, false, view);
+  gl.uniformMatrix4fv(progFloor.u.u_proj, false, proj);
+  gl.uniform3fv(progFloor.u.u_center, cam.target);
+  gl.uniform1f(progFloor.u.u_floorY, FL.floorY);
+  gl.uniform3fv(progFloor.u.u_corePos, corePos);
+  gl.uniform3fv(progFloor.u.u_coreColor, colors.core);
+  gl.uniform1f(progFloor.u.u_coreI, pose.coreI);
+  gl.bindVertexArray(quadVao);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  gl.useProgram(progMote.program);
+  gl.uniformMatrix4fv(progMote.u.u_view, false, view);
+  gl.uniformMatrix4fv(progMote.u.u_proj, false, proj);
+  gl.uniform1f(progMote.u.u_time, t);
+  gl.uniform1f(progMote.u.u_scale, 22 * canvas.height / 900);
+  gl.uniform1f(progMote.u.u_night, 1 - sky.day);
+  gl.uniform3fv(progMote.u.u_center, cam.target);
+  gl.bindVertexArray(moteVao);
+  gl.drawArrays(gl.POINTS, 0, CONFIG.moteCount);
+
+  // 3. 生物本體，還有跟著牠的幼體
+  drawCreature(pose, corePos, view, proj, eye, t);
+  for (const y of young) {
+    const yp = youngPose(pose, y);
+    drawCreature(yp, Mat.apply(yp.world[boneIndex.core], [0, 0, 0]), view, proj, eye, t);
+  }
+
+  // 卵、正在分出去的光球（池壁上，半透明）
+  const eggCount = fillEggs(corePos);
+  if (eggCount) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    gl.useProgram(progEgg.program);
+    const gu = progEgg.u;
+    gl.uniformMatrix4fv(gu.u_view, false, view);
+    gl.uniformMatrix4fv(gu.u_proj, false, proj);
+    gl.uniform3fv(gu.u_camPos, eye);
+    gl.uniform3fv(gu.u_shell, colors.body);
+    gl.uniform3fv(gu.u_core, colors.core);
+    gl.uniform1f(gu.u_time, t);
+    gl.bindVertexArray(eggVao);
+    gl.drawElementsInstanced(gl.TRIANGLES, eggIndexCount, gl.UNSIGNED_SHORT, 0, eggCount);
+  }
+
   // 4. 孢子（加法混合，會被核心擋住）
   gl.blendFunc(gl.ONE, gl.ONE);
   gl.useProgram(progSpore.program);
@@ -2063,6 +2522,13 @@ function frame(now) {
   gl.uniform1f(progGlow.u.u_int, 0.3 + 0.8 * pose.coreI);
   gl.bindVertexArray(quadVao);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+  for (const y of young) {                              // 幼體的光暈（小、比較暗）
+    const yp = youngPose(pose, y);
+    gl.uniform3fv(progGlow.u.u_center, Mat.apply(yp.world[boneIndex.core], [0, 0, 0]));
+    gl.uniform1f(progGlow.u.u_size, DATA.params.core_radius * 6 * y.scale);
+    gl.uniform1f(progGlow.u.u_int, (0.3 + 0.8 * pose.coreI) * BR.youngGlow);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
 
   gl.depthMask(true);
   requestAnimationFrame(frame);
