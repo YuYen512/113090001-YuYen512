@@ -349,6 +349,20 @@ CHECKS = [
     return { ok, info };
   }"""),
 
+  ("D17", "快捷鍵 P：直接到冷卻池邊（到了就能分裂），再按一次回到原本的位置", """async () => {
+    __t.reset(); flight.pos = [3, 1, 4]; flight.heading = 1.2; stamina = 1;
+    const start = flight.pos.slice();
+    const press = (code) => { window.dispatchEvent(new KeyboardEvent('keydown', { code })); window.dispatchEvent(new KeyboardEvent('keyup', { code })); };
+    press('KeyP');
+    const info = { 按P後在地底: inChamber(flight.pos), 可以分裂: breedBlocker() === null };
+    const q = flight.pos.slice(); resolveCollisions(q, FL.collisionRadius);
+    info.卡在東西裡 = Math.hypot(...sub(q, flight.pos)) > 0.05;
+    press('KeyP');
+    info.再按P離原位 = +Math.hypot(...sub(flight.pos, start)).toFixed(2);
+    __t.reset(); flight.pos = [0, 0, 0];
+    return { ok: info.按P後在地底 && info.可以分裂 && !info.卡在東西裡 && info.再按P離原位 < 0.01, info };
+  }"""),
+
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {
     const tower = COL.cyls.find((c) => c.shell);
     const top = tower.base[1] + tower.height;

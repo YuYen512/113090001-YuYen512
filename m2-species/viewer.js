@@ -1079,6 +1079,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyZ') { if (!e.repeat) requestMode(mode === 'sleep' ? 'hover' : 'sleep'); return; }
   if (e.code === 'KeyT') { if (!e.repeat) dayClock.speed = dayClock.speed > 1 ? 1 : DN.fastForward; return; }   // 時間快轉
   if (e.code === 'KeyR') { if (!e.repeat) tryBreed(); return; }                                                        // 分裂
+  if (e.code === 'KeyP') { if (!e.repeat) jumpToPool(); return; }                                                      // 直接到冷卻池／回去
   if (CONTROL_KEYS.includes(e.code)) {
     e.preventDefault();
     keys.add(e.code);
@@ -1316,6 +1317,29 @@ function eggSpot(face) {
   const w = face.at(a);
   const p = w[2] === 'z' ? [w[0], y, w[1]] : [w[0], y, w[1]];
   return [p[0] + face.n[0] * off, p[1], p[2] + face.n[2] * off];
+}
+
+// 快捷鍵 P：直接到冷卻池邊（到了就能按 R 分裂）；在冷卻池時再按一次，回到剛剛的位置
+let poolReturn = null;
+function jumpToPool() {
+  if (!POOL) return;
+  const goTo = (p, heading) => {
+    flight.pos = p.slice(); flight.speed = 0; flight.vy = 0; flight.turn = 0;
+    if (heading !== undefined) flight.heading = heading;
+    cam.target = p.slice();
+  };
+  if (inChamber(flight.pos) && poolReturn) {
+    goTo(poolReturn.pos, poolReturn.heading);
+    poolReturn = null;
+    breedMsg = { text: '回到剛剛的地方', until: breedClock + 2 };
+  } else {
+    poolReturn = { pos: flight.pos.slice(), heading: flight.heading };
+    const m = LANDMARKS.find((l) => l.kind === 5);
+    const at = [m.at[0], POOL.water_y + 1.8, m.at[2]];
+    goTo(at, Math.atan2(m.look[0] - at[0], m.look[2] - at[2]));      // 面向池壁
+    if (mode !== 'sleep') setMode('hover');
+    breedMsg = { text: '到冷卻池了 · 按 R 分裂，按 P 回去', until: breedClock + 3 };
+  }
 }
 
 // 現在不能分裂的原因（可以的話回傳 null）
