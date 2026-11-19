@@ -1,0 +1,8 @@
+[package]
+name = "creature"
+version = "0.1.0"
+edition = "2021"
+description = "想像中的生物：半透明水滴身體、薄翼與發光核心（第一階段）"
+
+# 只用 Rust 標準函式庫，沒有任何外部套件
+[dependencies]
