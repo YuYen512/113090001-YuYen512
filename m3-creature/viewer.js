@@ -168,6 +168,9 @@ const CONFIG = {
     humAttack: 0.35,           // 聲音慢慢浮現的時間（秒）。太短會像「敲」鈴鐺；長一點像手指劃過玻璃杯口
     humRelease: 2.6,           // 餘韻慢慢消失的時間（秒），長一點比較通透
     humSleepVolume: 0.25,      // 睡著時剩多大聲
+    humWhenFlying: false,      // 飛行時要不要響（使用者覺得飛行時一直響有點煩，關掉；漂浮、睡覺時還是會輕輕響）
+    flapVolume: 0.1,           // 翅膀拍動的「呼」聲有多大（很小聲，0 = 不要）
+    flapTone: 520,             // 拍翅聲的音色（Hz）：越小越像低低的風聲，越大越像布料擦過
     // 音色：每一組是 [音高的幾倍, 音量]。主音 + 一個差一點點的音（疊在一起會微微閃動，產生透明感）+ 很淡的泛音
     // （上一版有 2.76、5.4、8.93 倍這種「鐘」的泛音，使用者覺得像鈴鐺、太亮，拿掉了）
     partials: [[1, 1], [1.003, 0.7], [2.0, 0.1], [3.0, 0.025]],
@@ -1552,7 +1555,7 @@ function fillEggs(corePos) {
 //  （離鏡頭越近越大聲，聽得出從左邊還是右邊來；在地底會有洞穴的回音）
 // ---------------------------------------------------------------------
 const SND = CONFIG.sound;
-const sound = { ctx: null, on: false, master: null, echo: null, echoSend: null, nextCall: 0, stats: { hums: 0, calls: 0, replies: 0 } };
+const sound = { ctx: null, on: false, master: null, echo: null, echoSend: null, noise: null, nextCall: 0, stats: { hums: 0, calls: 0, replies: 0, flaps: 0 } };
 
 // 洞穴回音：用一段慢慢變小的雜訊當作「房間的回音樣本」
 function makeEcho(ctx, seconds) {
@@ -1577,7 +1580,11 @@ function soundGraph(ctx) {
   const echoSend = ctx.createGain();
   echoSend.gain.value = 0.2;                            // 地面上也留一點空氣感的回音
   echoSend.connect(echo).connect(master);
-  return { master, echo, echoSend };
+  // 一段 1 秒的「沙沙」雜訊，拍翅聲就是從這裡剪一小段、濾成像風的「呼」
+  const noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+  const nd = noise.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  return { master, echo, echoSend, noise };
 }
 
 // 一聲：f = 音高，len = 持續多久，glide = 結束時的音高（滑音），vol = 音量，pos = 3D 位置，bright = 多亮
@@ -1642,7 +1649,7 @@ function soundOn() {
 }
 function soundOff() { sound.on = false; if (sound.ctx) sound.ctx.suspend(); }
 
-// 核心發亮時：輕輕響一聲（累了比較低、睡著時很輕）
+// 核心發亮時：輕輕響一聲（累了比較低、睡著時很輕；飛行時不響，見 humWhenFlying）
 function playHum(pose, corePos) {
   sound.stats.hums++;
   if (!sound.on) return;
@@ -1651,6 +1658,36 @@ function playHum(pose, corePos) {
   const vol = 0.3 * lerp(1, SND.humSleepVolume, pose.sleep) * (0.5 + 0.5 * Math.min(1, pose.pulseAmp));
   const len = SND.humRelease * lerp(1, 1.6, pose.sleep);
   voice(sound.ctx, sound, sound.ctx.currentTime + 0.01, { f, glide: f * 0.97, len, vol, pos: corePos, bright: lerp(1, 0.6, pose.sleep) });
+}
+
+// 翅膀往下拍：很輕的一聲「呼」（像風吹過，不是叫聲）。拍得越大力越清楚
+function playFlap(strength, corePos, ctx = sound.ctx, graph = sound, at = null) {
+  if (graph === sound) sound.stats.flaps++;
+  if ((graph === sound && !sound.on) || SND.flapVolume <= 0) return;
+  const when = at ?? ctx.currentTime + 0.01, len = 0.45;
+  const src = ctx.createBufferSource();
+  src.buffer = graph.noise;
+  const band = ctx.createBiquadFilter();               // 只留中間一段頻率，雜訊就變成柔柔的「呼」
+  band.type = 'bandpass';
+  band.Q.value = 0.9;
+  band.frequency.setValueAtTime(SND.flapTone * 1.3, when);
+  band.frequency.exponentialRampToValueAtTime(SND.flapTone * 0.7, when + len);   // 往下拍時聲音稍微往下沉
+  const env = ctx.createGain();
+  const vol = SND.flapVolume * strength;
+  env.gain.setValueAtTime(0, when);
+  env.gain.linearRampToValueAtTime(vol, when + 0.12);
+  env.gain.setTargetAtTime(0, when + 0.12, 0.1);
+  src.connect(band).connect(env);
+  let out = env;
+  if (ctx.createPanner) {
+    const pan = ctx.createPanner();
+    pan.panningModel = 'HRTF'; pan.distanceModel = 'inverse'; pan.refDistance = SND.hearDistance;
+    if (pan.positionX) { pan.positionX.value = corePos[0]; pan.positionY.value = corePos[1]; pan.positionZ.value = corePos[2]; }
+    else pan.setPosition(...corePos);
+    out = env.connect(pan);
+  }
+  out.connect(graph.master);
+  src.start(when, Math.random() * 0.4, len + 0.1);
 }
 
 // 叫聲：成體發出一串滑音，幼體各自隔一下回應（比較高、比較短，從牠們自己的位置傳來）
@@ -1680,7 +1717,7 @@ function playReply(y, pos) {
 }
 
 // 每一幀：聽的位置跟著鏡頭；偵測核心亮到最高的那一刻；時間到了就叫一聲；幼體到時間就回應
-let lastWave = 0, waveRising = false;
+let lastWave = 0, waveRising = false, lastFlap = 0, flapRising = false;
 let corePosNow = [0, 0, 0];
 
 // 面板上的「聲音 開／關」（瀏覽器規定：要使用者點一下才能出聲音，所以預設是關的）
@@ -1695,9 +1732,15 @@ function updateSound(dt, pose, corePos, eye, target) {
   callGlow = Math.max(0, callGlow - dt * 1.5);
   // 核心亮度到頂（剛剛還在變亮、現在開始變暗）→ 響一聲
   const w = pose.wave;
-  if (w < lastWave && waveRising && lastWave > 0.6) playHum(pose, corePos);
+  const flying = pose.fly > 0.5;
+  if (w < lastWave && waveRising && lastWave > 0.6 && (SND.humWhenFlying || !flying)) playHum(pose, corePos);
   waveRising = w > lastWave;
   lastWave = w;
+  // 翅膀拍到最高、開始往下拍的那一刻 → 呼
+  const fs = Math.sin(pose.phase);
+  if (fs < lastFlap && flapRising && lastFlap > 0.9 && pose.fly > 0.3) playFlap(Math.min(1, pose.fly), corePos);
+  flapRising = fs > lastFlap;
+  lastFlap = fs;
   // 醒著的時候，偶爾自己叫一聲
   const now = breedClock;
   if (!sound.nextCallAt) sound.nextCallAt = now + 6;

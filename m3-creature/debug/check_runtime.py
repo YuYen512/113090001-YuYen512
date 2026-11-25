@@ -363,21 +363,23 @@ CHECKS = [
     return { ok: info.按P後在地底 && info.可以分裂 && !info.卡在東西裡 && info.再按P離原位 < 0.01, info };
   }"""),
 
-  ("D18", "聲音：核心每次亮到頂就「嗡」一聲（不多不少）；叫一聲後每隻幼體都會回應；睡著時不會自己叫", """async () => {
+  ("D18", "聲音：飛行時不會一直響、只有每次往下拍翅很輕的「呼」；漂浮時核心亮到頂才響；叫一聲後每隻幼體都會回應；睡著時不會自己叫", """async () => {
     const info = {};
     __t.reset(); flight.pos = [0, 0, 0];
     const run = (sec, m) => {
-      setMode(m); sound.stats.hums = 0; let peaks = 0, lw = 0, up = false;
+      setMode(m); sound.stats.hums = 0; sound.stats.flaps = 0; let peaks = 0, lw = 0, up = false;
       for (let i = 0; i < sec * 60; i++) {
         const dt = 1 / 60; updateFlight(i * dt, dt); updateStamina(dt); updateBreeding(dt);
         const pose = animate(i * dt, dt); const cp = Mat.apply(pose.world[boneIndex.core], [0, 0, 0]);
         if (pose.wave < lw && up && lw > 0.6) peaks++; up = pose.wave > lw; lw = pose.wave;
         updateSound(dt, pose, cp, [0, 2, 8], cp);
       }
-      return [peaks, sound.stats.hums];
+      return [peaks, sound.stats.hums, sound.stats.flaps];
     };
-    const [p1, h1] = run(20, 'fly');
-    info.飛行20秒 = `核心亮到頂 ${p1} 次、嗡 ${h1} 聲`;
+    const [p1, h1, f1] = run(20, 'fly');
+    info.飛行20秒 = `核心亮到頂 ${p1} 次、響 ${h1} 聲、拍翅呼 ${f1} 聲`;
+    const [p2, h2] = run(30, 'hover');
+    info.漂浮30秒 = `核心亮到頂 ${p2} 次、響 ${h2} 聲`;
     // 叫聲 → 幼體回應
     for (let k = 0; k < 3; k++) young.push({ pos: [k * 2, 1, 2], heading: 0, age: 60, scale: 0.4, born: [0, 0, 0], goal: null });
     sound.stats.calls = 0; sound.stats.replies = 0; setMode('hover');
@@ -389,7 +391,7 @@ CHECKS = [
     run(60, 'sleep');
     info.睡著60秒自己叫了 = sound.stats.calls;
     __t.reset(); flight.pos = [0, 0, 0];
-    return { ok: p1 > 3 && p1 === h1 && sound.stats.calls === 0 && info.叫一聲後幼體回應 === '3 / 3', info };
+    return { ok: p1 > 3 && h1 === 0 && f1 >= 18 && f1 <= 30 && p2 > 0 && p2 === h2 && sound.stats.calls === 0 && info.叫一聲後幼體回應 === '3 / 3', info };
   }"""),
 
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {
