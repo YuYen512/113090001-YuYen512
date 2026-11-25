@@ -153,6 +153,7 @@ const CONFIG = {
     growTime: 90,              // 幾秒長到 youngScale
     youngSpeed: 2.2,           // 幼體飛多快（成體是 3.2）
     youngLinger: [3, 8],       // 幼體到了一個地方，停下來看幾秒
+    startYoung: 1,             // 每次打開或重新整理網頁，一開始就有幾隻幼體在成體旁邊（0 = 沒有，要自己去冷卻池繁殖）
     youngRoam: 12,             // 幼體通常在附近幾公尺內找下一個想去的地方
     youngGlow: 0.55,           // 幼體的菌絲和核心比成體暗多少（菌絲還很微弱）
   },
@@ -2837,4 +2838,15 @@ function frame(now) {
   gl.depthMask(true);
   requestAnimationFrame(frame);
 }
+// 一打開網頁就有幼體：放在成體旁邊（已經長到幼體的大小），之後跟孵出來的一樣自己到處飛
+function spawnStartYoung() {
+  for (let k = 0; k < BR.startYoung && eggs.length + young.length < BR.maxOffspring; k++) {
+    const a = flight.heading + Math.PI * 0.6 + k * 1.3;          // 在成體的側前方，每多一隻換個方向
+    const p = [flight.pos[0] + Math.sin(a) * 2.5, flight.pos[1] + 0.4, flight.pos[2] + Math.cos(a) * 2.5];
+    p[1] = Math.max(p[1], groundHeightAt(p[0], p[2]) + 1.2);
+    resolveCollisions(p, 0.6);                                     // 不要卡在東西裡
+    young.push({ pos: p, heading: flight.heading, age: BR.growTime, scale: BR.youngScale, born: p.slice(), goal: null });
+  }
+}
+spawnStartYoung();
 requestAnimationFrame(frame);
