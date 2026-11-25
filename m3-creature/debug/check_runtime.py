@@ -363,7 +363,7 @@ CHECKS = [
     return { ok: info.按P後在地底 && info.可以分裂 && !info.卡在東西裡 && info.再按P離原位 < 0.01, info };
   }"""),
 
-  ("D18", "聲音：飛行時不會一直響、只有每次往下拍翅很輕的「呼」；漂浮時核心亮到頂才響；叫一聲後每隻幼體都會回應；睡著時不會自己叫", """async () => {
+  ("D18", "聲音：飛行時不會一直響（拍翅聲目前關掉）；漂浮時核心亮到頂才響；叫一聲後每隻幼體都會回應；睡著時不會自己叫", """async () => {
     const info = {};
     __t.reset(); flight.pos = [0, 0, 0];
     const run = (sec, m) => {
@@ -377,7 +377,7 @@ CHECKS = [
       return [peaks, sound.stats.hums, sound.stats.flaps];
     };
     const [p1, h1, f1] = run(20, 'fly');
-    info.飛行20秒 = `核心亮到頂 ${p1} 次、響 ${h1} 聲、拍翅呼 ${f1} 聲`;
+    info.飛行20秒 = `核心亮到頂 ${p1} 次、響 ${h1} 聲、拍翅聲 ${SND.flapVolume === 0 ? '關掉' : f1 + ' 聲'}`;
     const [p2, h2] = run(30, 'hover');
     info.漂浮30秒 = `核心亮到頂 ${p2} 次、響 ${h2} 聲`;
     // 叫聲 → 幼體回應
@@ -391,7 +391,7 @@ CHECKS = [
     run(60, 'sleep');
     info.睡著60秒自己叫了 = sound.stats.calls;
     __t.reset(); flight.pos = [0, 0, 0];
-    return { ok: p1 > 3 && h1 === 0 && f1 >= 18 && f1 <= 30 && p2 > 0 && p2 === h2 && sound.stats.calls === 0 && info.叫一聲後幼體回應 === '3 / 3', info };
+    return { ok: p1 > 3 && h1 === 0 && (SND.flapVolume === 0 || (f1 >= 18 && f1 <= 30)) && p2 > 0 && p2 === h2 && sound.stats.calls === 0 && info.叫一聲後幼體回應 === '3 / 3', info };
   }"""),
 
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {
