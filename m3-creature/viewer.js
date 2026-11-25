@@ -165,11 +165,13 @@ const CONFIG = {
     humPitch: 330,             // 核心發亮時那一聲的基本音高（Hz）。數字越大越高
     humTiredPitch: 0.89,       // 累的時候音高變成幾倍（變低）
     humSleepPitch: 0.84,       // 睡著時音高變成幾倍
-    humAttack: 0.06,           // 聲音冒出來的時間（秒），短一點比較像輕敲玻璃
+    humAttack: 0.35,           // 聲音慢慢浮現的時間（秒）。太短會像「敲」鈴鐺；長一點像手指劃過玻璃杯口
     humRelease: 2.6,           // 餘韻慢慢消失的時間（秒），長一點比較通透
     humSleepVolume: 0.25,      // 睡著時剩多大聲
-    // 音色：每一組是 [音高的幾倍, 音量]。玻璃、風鈴的泛音不是整數倍，所以聽起來「透」而不是「悶」
-    partials: [[1, 1], [1.003, 0.7], [2.0, 0.22], [2.76, 0.16], [5.4, 0.06], [8.93, 0.025]],
+    // 音色：每一組是 [音高的幾倍, 音量]。主音 + 一個差一點點的音（疊在一起會微微閃動，產生透明感）+ 很淡的泛音
+    // （上一版有 2.76、5.4、8.93 倍這種「鐘」的泛音，使用者覺得像鈴鐺、太亮，拿掉了）
+    partials: [[1, 1], [1.003, 0.7], [2.0, 0.1], [3.0, 0.025]],
+    brightness: 2200,          // 高頻留到多高（Hz）。越小越柔，越大越亮
     callEvery: [25, 45],       // 隔幾秒自己叫一次（醒著的時候）
     callPitch: [494, 587, 440],// 叫聲：從第一個音滑到第二個，再滑到第三個（Hz）
     youngPitch: 1.5,           // 幼體回應的音高是成體的幾倍（比較高）
@@ -1580,33 +1582,35 @@ function soundGraph(ctx) {
 
 // 一聲：f = 音高，len = 持續多久，glide = 結束時的音高（滑音），vol = 音量，pos = 3D 位置，bright = 多亮
 function voice(ctx, graph, when, { f, glide = f, len, vol, pos = null, bright = 1 }) {
-  // 音量：輕輕冒出來 → 停一下下 → 長長的餘韻慢慢消失（像用手指沿著玻璃杯口劃一圈）
+  // 音量：慢慢浮現 → 停一下下 → 長長的餘韻慢慢消失（像用手指沿著玻璃杯口劃一圈）
+  // 很短的聲音（幼體回應）浮現時間跟著縮短，不然還沒出來就結束了
+  const attack = Math.min(SND.humAttack, len * 0.4);
   const hold = len * 0.15;
   const env = ctx.createGain();
   env.gain.setValueAtTime(0, when);
-  env.gain.linearRampToValueAtTime(vol, when + SND.humAttack);
-  env.gain.setValueAtTime(vol, when + SND.humAttack + hold);
-  env.gain.setTargetAtTime(0, when + SND.humAttack + hold, len / 4);
+  env.gain.linearRampToValueAtTime(vol, when + attack);
+  env.gain.setValueAtTime(vol, when + attack + hold);
+  env.gain.setTargetAtTime(0, when + attack + hold, len / 4);
   // 只濾掉悶悶的低頻、和最刺耳的極高頻，中間的「亮」保留下來
   const low = ctx.createBiquadFilter();
   low.type = 'highpass';
   low.frequency.value = 160;
   const top = ctx.createBiquadFilter();
   top.type = 'lowpass';
-  top.frequency.value = 6000 * bright;
+  top.frequency.value = SND.brightness * bright;
   // 每個泛音：高的泛音消失得比較快，所以聲音尾巴會越來越純、越來越透
   for (const [mul, g] of SND.partials) {
     const o = ctx.createOscillator();
     o.type = 'sine';
     o.frequency.setValueAtTime(f * mul, when);
-    o.frequency.exponentialRampToValueAtTime(glide * mul, when + SND.humAttack + len * 0.8);
+    o.frequency.exponentialRampToValueAtTime(glide * mul, when + attack + len * 0.8);
     const og = ctx.createGain();
     const amp = g * 0.2 * Math.min(1, bright);
     og.gain.setValueAtTime(amp, when);
-    if (mul > 1.5) og.gain.setTargetAtTime(0, when + SND.humAttack, len / (2 * mul));
+    if (mul > 1.5) og.gain.setTargetAtTime(0, when + attack, len / (2 * mul));
     o.connect(og).connect(env);
     o.start(when);
-    o.stop(when + SND.humAttack + len * 1.6 + 0.3);
+    o.stop(when + attack + len * 1.6 + 0.3);
   }
   env.connect(low).connect(top);
   let out = top;
