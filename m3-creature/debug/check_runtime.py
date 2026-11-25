@@ -371,7 +371,7 @@ CHECKS = [
       for (let i = 0; i < sec * 60; i++) {
         const dt = 1 / 60; updateFlight(i * dt, dt); updateStamina(dt); updateBreeding(dt);
         const pose = animate(i * dt, dt); const cp = Mat.apply(pose.world[boneIndex.core], [0, 0, 0]);
-        if (pose.wave < lw && up && lw > 0.6) peaks++; up = pose.wave > lw; lw = pose.wave;
+        if (pose.wave < lw && up && lw > 0.6 && (m === 'fly' || pose.fly <= 0.5)) peaks++; up = pose.wave > lw; lw = pose.wave;   // 漂浮時只算真的停下來後的發亮（剛切換、半飛半停時本來就不響）
         updateSound(dt, pose, cp, [0, 2, 8], cp);
       }
       return [peaks, sound.stats.hums, sound.stats.flaps];
