@@ -384,7 +384,7 @@ CHECKS = [
     for (let k = 0; k < 3; k++) young.push({ pos: [k * 2, 1, 2], heading: 0, age: 60, scale: 0.4, born: [0, 0, 0], goal: null });
     sound.stats.calls = 0; sound.stats.replies = 0; setMode('hover');
     playCall([0, 1, 0]);
-    run(2, 'hover');
+    run(5, 'hover');   // 幼體叫完再停一下才回，所以等 5 秒
     info.叫一聲後幼體回應 = sound.stats.replies + ' / ' + young.length;
     // 睡著：60 秒內不會自己叫
     young.length = 0; sound.stats.calls = 0; sound.nextCallAt = 0; setMode('sleep'); sleepBlend = 1;
