@@ -363,6 +363,35 @@ CHECKS = [
     return { ok: info.按P後在地底 && info.可以分裂 && !info.卡在東西裡 && info.再按P離原位 < 0.01, info };
   }"""),
 
+  ("D18", "聲音：核心每次亮到頂就「嗡」一聲（不多不少）；叫一聲後每隻幼體都會回應；睡著時不會自己叫", """async () => {
+    const info = {};
+    __t.reset(); flight.pos = [0, 0, 0];
+    const run = (sec, m) => {
+      setMode(m); sound.stats.hums = 0; let peaks = 0, lw = 0, up = false;
+      for (let i = 0; i < sec * 60; i++) {
+        const dt = 1 / 60; updateFlight(i * dt, dt); updateStamina(dt); updateBreeding(dt);
+        const pose = animate(i * dt, dt); const cp = Mat.apply(pose.world[boneIndex.core], [0, 0, 0]);
+        if (pose.wave < lw && up && lw > 0.6) peaks++; up = pose.wave > lw; lw = pose.wave;
+        updateSound(dt, pose, cp, [0, 2, 8], cp);
+      }
+      return [peaks, sound.stats.hums];
+    };
+    const [p1, h1] = run(20, 'fly');
+    info.飛行20秒 = `核心亮到頂 ${p1} 次、嗡 ${h1} 聲`;
+    // 叫聲 → 幼體回應
+    for (let k = 0; k < 3; k++) young.push({ pos: [k * 2, 1, 2], heading: 0, age: 60, scale: 0.4, born: [0, 0, 0], goal: null });
+    sound.stats.calls = 0; sound.stats.replies = 0; setMode('hover');
+    playCall([0, 1, 0]);
+    run(2, 'hover');
+    info.叫一聲後幼體回應 = sound.stats.replies + ' / ' + young.length;
+    // 睡著：60 秒內不會自己叫
+    young.length = 0; sound.stats.calls = 0; sound.nextCallAt = 0; setMode('sleep'); sleepBlend = 1;
+    run(60, 'sleep');
+    info.睡著60秒自己叫了 = sound.stats.calls;
+    __t.reset(); flight.pos = [0, 0, 0];
+    return { ok: p1 > 3 && p1 === h1 && sound.stats.calls === 0 && info.叫一聲後幼體回應 === '3 / 3', info };
+  }"""),
+
   ("D08", "飛行高度上限維持 30（已決定維持現狀，冷卻塔頂端暫時飛不到）", """async () => {
     const tower = COL.cyls.find((c) => c.shell);
     const top = tower.base[1] + tower.height;
@@ -379,7 +408,10 @@ async def main():
         page.set_default_timeout(120000)
         console_errors = []
         page.on("pageerror", lambda e: console_errors.append(str(e)))
-        page.on("console", lambda m: console_errors.append(m.text) if m.type in ("error", "warning") else None)
+        # 顯示卡驅動程式自己印的「效能提示」（例如 GPU stall due to ReadPixels）是截圖時驅動程式發出的，不是程式的錯誤，不算
+        # （換了新的測試環境後才出現；沒有改過的 m2 也一樣，見 debug-log.md D19）
+        page.on("console", lambda m: console_errors.append(m.text)
+                if m.type in ("error", "warning") and not ("GL Driver Message" in m.text and "Performance" in m.text) else None)
         await page.goto(PAGE)
         await page.wait_for_timeout(1500)
         await page.evaluate(HELPERS)

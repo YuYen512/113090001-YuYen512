@@ -157,6 +157,24 @@ const CONFIG = {
     youngGlow: 0.55,           // 幼體的菌絲和核心比成體暗多少（菌絲還很微弱）
   },
 
+  // 聲音（瀏覽器內建的 Web Audio API 即時合成，沒有用任何音檔）
+  // 牠的聲音是低鳴的「嗡」：核心每次發亮就嗡一聲；偶爾發出一串叫聲，幼體會用比較高、比較短的聲音回應
+  sound: {
+    volume: 0.7,               // 總音量（0～1）
+    humPitch: 98,              // 「嗡」的基本音高（Hz）。筆電喇叭太低的音聽不到，98 Hz 再加上泛音才聽得到
+    humTiredPitch: 0.86,       // 累的時候音高變成幾倍（變低）
+    humSleepPitch: 0.8,        // 睡著時音高變成幾倍
+    humAttack: 0.14,           // 「嗡」慢慢變大的時間（秒）
+    humRelease: 1.5,           // 「嗡」慢慢消失的時間（秒）
+    humSleepVolume: 0.25,      // 睡著時「嗡」剩多大聲
+    callEvery: [25, 45],       // 隔幾秒自己叫一次（醒著的時候）
+    callPitch: [123, 147, 110],// 叫聲：從第一個音滑到第二個，再滑到第三個（Hz）
+    youngPitch: 1.8,           // 幼體回應的音高是成體的幾倍（比較高）
+    youngDelay: [0.6, 1.4],    // 幼體聽到叫聲後，隔幾秒回應
+    hearDistance: 4,           // 在這個距離內聽到的是正常音量，越遠越小聲
+    caveEcho: 0.55,            // 在地底時的回音有多大（地面上只有一點點）
+  },
+
   // 自己的行為：沒人操作時自己探索、天快亮時自己找地方躲起來
   autonomy: {
     enabled: true,
@@ -1079,7 +1097,8 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyZ') { if (!e.repeat) requestMode(mode === 'sleep' ? 'hover' : 'sleep'); return; }
   if (e.code === 'KeyT') { if (!e.repeat) dayClock.speed = dayClock.speed > 1 ? 1 : DN.fastForward; return; }   // 時間快轉
   if (e.code === 'KeyR') { if (!e.repeat) tryBreed(); return; }                                                        // 分裂
-  if (e.code === 'KeyP') { if (!e.repeat) jumpToPool(); return; }                                                      // 直接到冷卻池／回去
+  if (e.code === 'KeyP') { if (!e.repeat) jumpToPool(); return; }
+  if (e.code === 'KeyC') { if (!e.repeat && mode !== 'sleep') { playCall(corePosNow); sound.nextCallAt = breedClock + lerp(SND.callEvery[0], SND.callEvery[1], Math.random()); } return; }   // 呼喚                                                      // 直接到冷卻池／回去
   if (CONTROL_KEYS.includes(e.code)) {
     e.preventDefault();
     keys.add(e.code);
@@ -1459,7 +1478,7 @@ function youngPose(pose, y) {
   return Object.assign({}, pose, {
     world: pose.world.map((m) => Mat.mul(A, m)),
     glowScale: pose.glowScale * BR.youngGlow,
-    coreI: pose.coreI * lerp(0.6, 1, BR.youngGlow),
+    coreI: pose.coreI * lerp(0.6, 1, BR.youngGlow) + (y.replyGlow || 0) * 0.8,     // 回應叫聲時亮一下
     tendril: [pose.tendril[0], pose.tendril[1], pose.tendril[2], pose.tendril[3] * y.scale],
   });
 }
@@ -1520,6 +1539,176 @@ function fillEggs(corePos) {
   gl.bindBuffer(gl.ARRAY_BUFFER, eggBuf);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, eggCpu, 0, n * EGG_FLOATS);
   return n;
+}
+
+// ---------------------------------------------------------------------
+//  聲音：核心每次發亮時的低鳴「嗡」、成體的叫聲和幼體的回應
+//  全部用 Web Audio API 即時合成：幾個正弦波疊在一起（基本音 + 泛音）→ 音量慢慢變大再慢慢消失 → 放到 3D 空間裡的位置
+//  （離鏡頭越近越大聲，聽得出從左邊還是右邊來；在地底會有洞穴的回音）
+// ---------------------------------------------------------------------
+const SND = CONFIG.sound;
+const sound = { ctx: null, on: false, master: null, echo: null, echoSend: null, nextCall: 0, stats: { hums: 0, calls: 0, replies: 0 } };
+
+// 洞穴回音：用一段慢慢變小的雜訊當作「房間的回音樣本」
+function makeEcho(ctx, seconds) {
+  const len = Math.floor(ctx.sampleRate * seconds);
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6);
+  }
+  const conv = ctx.createConvolver();
+  conv.buffer = buf;
+  return conv;
+}
+
+// 建立聲音的「線路」：每個聲音 → 主音量 → 喇叭；另外分一點送到回音
+function soundGraph(ctx) {
+  const master = ctx.createGain();
+  master.gain.value = SND.volume;
+  const comp = ctx.createDynamicsCompressor();          // 很多聲音疊在一起時避免爆音
+  master.connect(comp).connect(ctx.destination);
+  const echo = makeEcho(ctx, 2.8);
+  const echoSend = ctx.createGain();
+  echoSend.gain.value = 0.1;
+  echoSend.connect(echo).connect(master);
+  return { master, echo, echoSend };
+}
+
+// 一聲「嗡」：f = 音高，len = 持續多久，glide = 結束時的音高（滑音），vol = 音量，pos = 3D 位置
+function voice(ctx, graph, when, { f, glide = f, len, vol, pos = null, bright = 1 }) {
+  // 音量：慢慢變大 → 維持一下 → 慢慢消失（像「嗡——」）
+  const hold = len * 0.35, fade = len * 0.65;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, when);
+  env.gain.linearRampToValueAtTime(vol, when + SND.humAttack);
+  env.gain.setValueAtTime(vol, when + SND.humAttack + hold);
+  env.gain.setTargetAtTime(0, when + SND.humAttack + hold, fade / 4);
+  const tone = ctx.createBiquadFilter();                 // 把太尖的高頻削掉，聽起來比較圓、比較悶
+  tone.type = 'lowpass';
+  tone.frequency.value = 700 * bright;
+  tone.Q.value = 0.7;
+  // 基本音 + 泛音（2、3、4 倍）+ 一個稍微走音的音，兩個很接近的音疊在一起會有「嗡嗡」的起伏
+  const partials = [[1, 1], [2, 0.45], [3, 0.2], [4, 0.08], [1.004, 0.6]];
+  for (const [mul, g] of partials) {
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(f * mul, when);
+    o.frequency.exponentialRampToValueAtTime(glide * mul, when + SND.humAttack + len * 0.8);
+    const og = ctx.createGain();
+    og.gain.value = g * 0.22;
+    o.connect(og).connect(env);
+    o.start(when);
+    o.stop(when + SND.humAttack + len + 0.3);
+  }
+  env.connect(tone);
+  let out = tone;
+  if (pos && ctx.createPanner) {
+    const pan = ctx.createPanner();
+    pan.panningModel = 'HRTF';
+    pan.distanceModel = 'inverse';
+    pan.refDistance = SND.hearDistance;
+    pan.rolloffFactor = 1;
+    if (pan.positionX) { pan.positionX.value = pos[0]; pan.positionY.value = pos[1]; pan.positionZ.value = pos[2]; }
+    else pan.setPosition(pos[0], pos[1], pos[2]);
+    out = tone.connect(pan);
+  }
+  out.connect(graph.master);
+  out.connect(graph.echoSend);
+}
+
+function soundOn() {
+  if (!sound.ctx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return false;
+    sound.ctx = new AC();
+    Object.assign(sound, soundGraph(sound.ctx));
+    sound.nextCall = sound.ctx.currentTime + 4;
+  }
+  sound.ctx.resume();
+  sound.on = true;
+  return true;
+}
+function soundOff() { sound.on = false; if (sound.ctx) sound.ctx.suspend(); }
+
+// 核心發亮時：嗡一聲（累了比較低、睡著時很輕）
+function playHum(pose, corePos) {
+  sound.stats.hums++;
+  if (!sound.on) return;
+  const tiredPitch = lerp(1, SND.humTiredPitch, pose.tired || 0);
+  const f = SND.humPitch * tiredPitch * lerp(1, SND.humSleepPitch, pose.sleep);
+  const vol = 0.5 * lerp(1, SND.humSleepVolume, pose.sleep) * (0.5 + 0.5 * Math.min(1, pose.pulseAmp));
+  const len = SND.humRelease * lerp(1, 1.6, pose.sleep);
+  voice(sound.ctx, sound, sound.ctx.currentTime + 0.01, { f, glide: f * 0.97, len, vol, pos: corePos, bright: lerp(1, 0.6, pose.sleep) });
+}
+
+// 叫聲：成體發出一串滑音，幼體各自隔一下回應（比較高、比較短，從牠們自己的位置傳來）
+let callGlow = 0;
+function playCall(corePos) {
+  sound.stats.calls++;
+  callGlow = 1.2;                                         // 叫的時候核心亮一下
+  const [a, b, c] = SND.callPitch;
+  young.forEach((y, k) => {
+    const delay = lerp(SND.youngDelay[0], SND.youngDelay[1], (k * 0.37 + Math.random() * 0.5) % 1);
+    y.replyAt = breedClock + delay;
+  });
+  if (!sound.on) return;
+  const t0 = sound.ctx.currentTime + 0.02;
+  voice(sound.ctx, sound, t0, { f: a, glide: b, len: 0.55, vol: 0.55, pos: corePos, bright: 1.3 });
+  voice(sound.ctx, sound, t0 + 0.6, { f: b, glide: c, len: 0.8, vol: 0.5, pos: corePos, bright: 1.3 });
+}
+function playReply(y, pos) {
+  sound.stats.replies++;
+  y.replyGlow = 1;
+  if (!sound.on) return;
+  const [a, b] = SND.callPitch;
+  const m = SND.youngPitch * (1 + 0.06 * ((young.indexOf(y) % 3) - 1));   // 每隻幼體音高差一點點
+  const t0 = sound.ctx.currentTime + 0.01;
+  voice(sound.ctx, sound, t0, { f: a * m, glide: b * m, len: 0.3, vol: 0.32, pos, bright: 1.6 });
+  voice(sound.ctx, sound, t0 + 0.32, { f: b * m, glide: a * m, len: 0.35, vol: 0.28, pos, bright: 1.6 });
+}
+
+// 每一幀：聽的位置跟著鏡頭；偵測核心亮到最高的那一刻；時間到了就叫一聲；幼體到時間就回應
+let lastWave = 0, waveRising = false;
+let corePosNow = [0, 0, 0];
+
+// 面板上的「聲音 開／關」（瀏覽器規定：要使用者點一下才能出聲音，所以預設是關的）
+const soundButtons = document.querySelectorAll('[data-sound]');
+function showSoundState() { soundButtons.forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.sound === 'on') === sound.on))); }
+soundButtons.forEach((b) => b.addEventListener('click', () => {
+  if (b.dataset.sound === 'on') soundOn(); else soundOff();
+  showSoundState();
+  b.blur();
+}));
+function updateSound(dt, pose, corePos, eye, target) {
+  callGlow = Math.max(0, callGlow - dt * 1.5);
+  // 核心亮度到頂（剛剛還在變亮、現在開始變暗）→ 嗡
+  const w = pose.wave;
+  if (w < lastWave && waveRising && lastWave > 0.6) playHum(pose, corePos);
+  waveRising = w > lastWave;
+  lastWave = w;
+  // 醒著的時候，偶爾自己叫一聲
+  const now = breedClock;
+  if (!sound.nextCallAt) sound.nextCallAt = now + 6;
+  if (mode !== 'sleep' && pose.sleep < 0.1 && now >= sound.nextCallAt) {
+    playCall(corePos);
+    sound.nextCallAt = now + lerp(SND.callEvery[0], SND.callEvery[1], Math.random());
+  }
+  for (const y of young) {
+    y.replyGlow = Math.max(0, (y.replyGlow || 0) - dt * 1.5);
+    if (y.replyAt && now >= y.replyAt) { y.replyAt = 0; playReply(y, y.pos); }
+  }
+  if (!sound.on) return;
+  // 聽的人站在鏡頭的位置，面向鏡頭看的方向
+  const L = sound.ctx.listener, f = norm(sub(target, eye)), r = norm(cross(f, [0, 1, 0])), u = cross(r, f);
+  if (L.positionX) {
+    L.positionX.value = eye[0]; L.positionY.value = eye[1]; L.positionZ.value = eye[2];
+    L.forwardX.value = f[0]; L.forwardY.value = f[1]; L.forwardZ.value = f[2];
+    L.upX.value = u[0]; L.upY.value = u[1]; L.upZ.value = u[2];
+  } else { L.setPosition(...eye); L.setOrientation(...f, ...u); }
+  // 在地底：回音變大
+  const want = POOL && inChamber(flight.pos) ? SND.caveEcho : 0.1;
+  sound.echoSend.gain.setTargetAtTime(want, sound.ctx.currentTime, 0.5);
 }
 
 // ---------------------------------------------------------------------
@@ -1884,6 +2073,7 @@ function animate(t, dt) {
   const breathe = 0.5 + 0.5 * Math.sin(breathePhase);
   const wave = lerp(breathe, flapPulse, k);
   let coreI = p.pulseBase + p.pulseAmp * wave;
+  coreI += callGlow * 0.6 * (1 - sk);                    // 叫的時候核心亮一下
   if (split) {                                          // 分裂中：核心快速閃動、越來越亮
     const g = smooth(Math.min(1, split.t / 1.2)) * (1 - smooth(Math.max(0, (split.t - BR.splitTime * 0.7) / (BR.splitTime * 0.3))));
     coreI += g * (0.5 + 0.5 * Math.sin(t * 11));
@@ -1958,7 +2148,7 @@ function animate(t, dt) {
     lift: 0.05 * k * Math.sin(phase + 1.0),
     breath: lerp(0.012 * Math.sin(t * 1.1), 0.02 * Math.sin(breathePhase), sk),
     bend: -CONFIG.wingBend * flapVel,
-    phase, pulsePhase, pulseFreq: p.flapFreq / N, fly: k, pulseBase: p.pulseBase, pulseAmp: p.pulseAmp,
+    phase, pulsePhase, pulseFreq: p.flapFreq / N, fly: k, pulseBase: p.pulseBase, pulseAmp: p.pulseAmp, wave,
     sleep: sk, breathePhase, breatheSpeed, glowScale: lerp(1, SL.glow, sk) * (1 - 0.5 * tired), tendril, tired,
     eyeGlow: CONFIG.eyeSpots.glow * lerp(1, CONFIG.eyeSpots.sleepGlow, sk),
     anchor, anchorYaw,                                  // 幼體借用這一幀的動作時，用來換算位置
@@ -2354,6 +2544,8 @@ function frame(now) {
   const pose = animate(t, dt);
   const corePos = Mat.apply(pose.world[boneIndex.core], [0, 0, 0]);
   updateSpores(t, dt, pose);
+  corePosNow = corePos;
+  updateSound(dt, pose, corePos, eye, cam.target);
 
   let statusText = mode === 'sleep' ? (pose.sleep > 0.95 ? (exhausted ? '累倒了，睡覺恢復中' : '睡覺中') : (exhausted ? '累倒了…' : '準備入睡…'))
     : pose.sleep > 0.05 ? '醒來中…'
